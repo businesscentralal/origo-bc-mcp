@@ -64,13 +64,25 @@ origo-bc-mcp-server remove production
 
 Removes the named connection from `local.settings.json` and its entry from VS Code's `mcp.json`. Prompts for confirmation.
 
+### Create a desktop shortcut
+
+```bash
+origo-bc-mcp-server shortcut              # shortcut for default server
+origo-bc-mcp-server shortcut production   # shortcut for a named connection
+```
+
+Creates a double-clickable shortcut on your Desktop to start the server:
+- **Windows:** `.lnk` file (opens cmd)
+- **macOS:** `.command` file (executable shell script)
+- **Linux:** `.desktop` file
+
 ### Clean all config
 
 ```bash
 origo-bc-mcp-server clean
 ```
 
-Removes the entire `local.settings.json` and all `origo-bc-*` entries from VS Code's `mcp.json`. Use this to start fresh. Prompts for confirmation.
+Removes the entire `local.settings.json`, all `origo-bc-*` entries from VS Code's `mcp.json`, and all desktop shortcuts. Use this to start fresh. Prompts for confirmation.
 
 ## Start the server
 
@@ -118,7 +130,8 @@ Commands:
   add [name]            Add a single connection (streamlined)
   verify [name]         Validate a connection (default: all connections)
   remove <name>         Remove a specific connection (or list available)
-  clean                 Remove ALL connections and reset config
+  shortcut [name]       Create a desktop shortcut to start the server
+  clean                 Remove ALL connections, config, and shortcuts
   init                  Create ~/.origo-bc-mcp/local.settings.json from template
 
 Options:
