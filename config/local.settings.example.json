@@ -1,0 +1,62 @@
+ {
+  "_comment": "Copy to config/local.settings.json (gitignored). DEV ONLY — ignored when NODE_ENV=production. Run 'origo-bc-mcp-server setup' for guided configuration.",
+
+  "basicAuth": {
+    "enabled": true,
+    "username": "dev",
+    "password": "change-me"
+  },
+
+  "_devConnection_onprem_example": {
+    "onPrem": true,
+    "baseUrl": "https://<host>:443/<instance>rest",
+    "onPremTenant": "default",
+    "user": "<bc-web-service-user>",
+    "key": "<bc-web-service-access-key | env:VAR_NAME | dpapi:base64>",
+    "companyId": "<company-guid>",
+    "companyName": "OnPrem",
+    "environment": "onprem"
+  },
+
+  "_devConnection_saas_example": {
+    "tenantId": "<entra-tenant-guid>",
+    "clientId": "<app-client-id>",
+    "clientSecret": "<client-secret | env:VAR_NAME | dpapi:base64 | keychain:service>",
+    "refreshToken": "<refresh-token | env:VAR_NAME | dpapi:base64 | keychain:service>",
+    "environment": "UAT",
+    "companyId": "<company-guid>"
+  },
+
+  "devConnection": {
+    "_comment": "The default connection (used when no ?connection= param is specified)",
+    "onPrem": true,
+    "baseUrl": "https://<host>:443/<instance>rest",
+    "onPremTenant": "default",
+    "user": "<bc-web-service-user>",
+    "key": "<bc-web-service-access-key>",
+    "companyId": "<company-guid>",
+    "companyName": "OnPrem",
+    "environment": "onprem"
+  },
+
+  "connections": {
+    "_comment": "Named connections — select via ?connection=<name> in the MCP URL",
+    "production": {
+      "tenantId": "<entra-tenant-guid>",
+      "clientId": "<app-client-id>",
+      "clientSecret": "env:BC_PROD_CLIENT_SECRET",
+      "environment": "production",
+      "companyId": "<company-guid>"
+    },
+    "sandbox": {
+      "tenantId": "<entra-tenant-guid>",
+      "clientId": "<app-client-id>",
+      "clientSecret": "env:BC_SANDBOX_CLIENT_SECRET",
+      "environment": "sandbox",
+      "companyId": "<company-guid>"
+    }
+  },
+
+  "setupConnection": "production",
+  "_setupConnection_comment": "Which connection to use for the setup environment (default memory, UBL templates). Must be a SaaS connection with companyId."
+}

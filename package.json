@@ -1,0 +1,26 @@
+{
+  "name": "origo-bc-mcp-server",
+  "version": "0.1.1888",
+  "description": "Origo Business Central MCP server (mcp.dynamics.is) — Streamable HTTP, dual auth (OAuth 2.1 + x-origo-token).",
+  "type": "module",
+  "engines": {
+    "node": ">=22"
+  },
+  "bin": {
+    "origo-bc-mcp-server": "dist/cli.js"
+  },
+  "files": [
+    "dist",
+    "config/local.settings.example.json",
+    "docs/setup-from-tarball.md"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.18.0",
+    "express": "^5.1.0",
+    "jose": "^5.9.6",
+    "zod": "^3.25.0"
+  },
+  "scripts": {
+    "start": "node dist/index.js"
+  }
+}

@@ -1,0 +1,68 @@
+{
+  "_comment": "Example MCP client configurations for origo-bc-mcp. Copy the relevant section into your editor's config.",
+
+  "===== VS Code (GitHub Copilot) =====": "Add to .vscode/mcp.json in your project, or to VS Code User Settings under 'mcp'.",
+
+  "vscode_project_mcp_json": {
+    "servers": {
+      "origo-bc": {
+        "type": "http",
+        "url": "https://mcp.dynamics.is/mcp",
+        "headers": {
+          "x-origo-token": "<encrypted-token>"
+        }
+      }
+    }
+  },
+
+  "vscode_project_mcp_json_local_dev": {
+    "servers": {
+      "origo-bc-local": {
+        "type": "http",
+        "url": "http://localhost:3000/mcp",
+        "headers": {
+          "Authorization": "Basic ZGV2OmNoYW5nZS1tZQ=="
+        }
+      }
+    }
+  },
+
+  "vscode_project_mcp_json_local_named_connection": {
+    "_comment": "Use ?connection=<name> to select a named connection from local.settings.json",
+    "servers": {
+      "origo-bc-sandbox": {
+        "type": "http",
+        "url": "http://localhost:3000/mcp?connection=sandbox",
+        "headers": {
+          "Authorization": "Basic ZGV2OmNoYW5nZS1tZQ=="
+        }
+      }
+    }
+  },
+
+  "===== Claude Code =====": "Add to .mcp.json in your project root, or ~/.claude/mcp.json for global config.",
+
+  "claude_code_mcp_json": {
+    "mcpServers": {
+      "origo-bc": {
+        "type": "http",
+        "url": "https://mcp.dynamics.is/mcp",
+        "headers": {
+          "x-origo-token": "<encrypted-token>"
+        }
+      }
+    }
+  },
+
+  "claude_code_mcp_json_local_dev": {
+    "mcpServers": {
+      "origo-bc-local": {
+        "type": "http",
+        "url": "http://localhost:3000/mcp",
+        "headers": {
+          "Authorization": "Basic ZGV2OmNoYW5nZS1tZQ=="
+        }
+      }
+    }
+  }
+}
