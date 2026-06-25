@@ -47,12 +47,14 @@ Examples:
 if (args[0] === "setup") {
     const { runSetup } = await import("./cli/setup.js");
     await runSetup();
-    setTimeout(() => process.exit(0), 10);
+    await new Promise((r) => setTimeout(r, 10));
+    process.exit(0);
 }
 if (args[0] === "add") {
     const { runAdd } = await import("./cli/setup.js");
     await runAdd(args[1]);
-    setTimeout(() => process.exit(0), 10);
+    await new Promise((r) => setTimeout(r, 10));
+    process.exit(0);
 }
 if (args[0] === "verify") {
     const { runVerify } = await import("./cli/verifyCommand.js");

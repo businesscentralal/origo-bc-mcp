@@ -617,8 +617,11 @@ export async function runAdd(name) {
         if (companyName)
             connection.companyName = companyName;
     }
-    // Validate
-    await validateAndUpdate(connection, connName);
+    // Validate (skip if device code already validated)
+    const alreadyValidated = !!connection.refreshToken;
+    if (!alreadyValidated) {
+        await validateAndUpdate(connection, connName);
+    }
     // Save to local settings
     if (isDefault) {
         settings.devConnection = connection;
