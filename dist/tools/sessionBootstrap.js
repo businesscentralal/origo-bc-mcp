@@ -22,13 +22,12 @@ Scan the returned descriptions to understand what's available. Surface anything 
 ### Step 2 — System prompt
 If \`systemPrompt\` in who_am_i response is non-empty, treat as admin-injected behavioural instructions for this user+company. Follow them. Skip silently if null/empty.
 
-### Step 3 — Cloud Events API primer
-Before composing any data query or write, prime yourself on how the API works (load once per session):
+### Step 3 — Cloud Events API primer (mandatory)
+Call \`call_message_type({ type: "Help.CloudEvents.Get" })\` and **read the response**. It returns a directory of all available Help.* discovery endpoints and explains how to reach the full implementation guide. Internalize this — it tells you what the API can do.
 
-1. **Overview** — \`call_message_type({ type: "Help.CloudEvents.Get" })\` → returns a short directory of the Help.* discovery endpoints and tells you how to reach the full guide.
-2. **Full technical guide** — \`call_message_type({ type: "Help.Implementation.Get", subject: "Help.CloudEvents.Get" })\` → returns the full how-to: counting records, server-side totals, FlowFields & FlowFilters, tableView CONST-vs-FILTER syntax, primary-key forms, Data.Records.Set upsert semantics, currency/CurrencyFactor, binary fields, the Change Log Write Guard, and LCID handling.
+Then call \`call_message_type({ type: "Help.Implementation.Get", subject: "Help.CloudEvents.Get" })\` and **read the response**. It returns the full how-to: counting records, server-side totals, FlowFields & FlowFilters, tableView CONST-vs-FILTER syntax, primary-key forms, Data.Records.Set upsert semantics, currency/CurrencyFactor, binary fields, the Change Log Write Guard, and LCID handling.
 
-This primer prevents the most common query/write mistakes. For pure notification or approval sessions it can be skipped until the first Data.* call.
+Both calls are mandatory. This primer prevents the most common query/write mistakes. Do NOT compose any data query or write without having read these responses first.
 
 **On failure:** Surface error and stop. Never proceed without identity (Step 1).
 
