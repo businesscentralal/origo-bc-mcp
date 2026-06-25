@@ -85,7 +85,7 @@ function readMcpConfig(path) {
  * If a refresh token is expired, triggers device-code flow with user consent.
  * Returns the validation result (may contain a newRefreshToken to persist).
  */
-async function validateAndUpdate(connection) {
+async function validateAndUpdate(connection, connName) {
     const doValidate = await askChoice("Validate connection now?", ["Yes", "No (skip)"], 0);
     if (doValidate.startsWith("No"))
         return null;
@@ -109,29 +109,7 @@ async function validateAndUpdate(connection) {
         }
         if (result.newRefreshToken) {
             console.log("\n  ✓ Refresh token updated.");
-            // Ask how to store the new token.
-            const storeMethod = await askChoice("How to store the new refresh token:", [
-                "Environment variable reference (recommended)",
-                "DPAPI-encrypted (Windows only)",
-                "Plain text (not recommended)",
-            ], 0);
-            if (storeMethod.startsWith("Environment")) {
-                const envVar = await ask("Environment variable name", "BC_DEV_REFRESH_TOKEN");
-                // Persist the raw token in the env var for the user; store reference in config.
-                console.log(`\n  ⚠ Set the environment variable now:`);
-                console.log(`    [Environment]::SetEnvironmentVariable('${envVar}', '<token>', 'User')`);
-                console.log(`  The actual token value is in your clipboard (or shown below if clipboard unavailable).`);
-                copyToClipboard(result.newRefreshToken);
-                connection.refreshToken = `env:${envVar}`;
-            }
-            else if (storeMethod.startsWith("DPAPI")) {
-                const wrapped = dpapiWrap(result.newRefreshToken);
-                connection.refreshToken = wrapped;
-                console.log("  ✓ Refresh token DPAPI-encrypted and stored in config.");
-            }
-            else {
-                connection.refreshToken = result.newRefreshToken;
-            }
+            connection.refreshToken = await wrapKnownSecret("refresh token", result.newRefreshToken, "BC_DEV_REFRESH_TOKEN", `origo-bc-mcp-${connName}-token`);
         }
     }
     else {
@@ -144,7 +122,7 @@ async function validateAndUpdate(connection) {
     }
     return result;
 }
-// ── DPAPI wrap (for storing refreshed tokens) ────────────────────────────────
+// ── DPAPI wrap (Windows) ──────────────────────────────────────────────────────
 function dpapiWrap(plainText) {
     if (platform() !== "win32") {
         throw new Error("DPAPI is only available on Windows.");
@@ -166,6 +144,90 @@ function dpapiWrap(plainText) {
         throw new Error(`DPAPI wrap failed (exit ${result.status})`);
     }
     return "dpapi:" + (result.stdout ?? "").toString().trim();
+}
+// ── macOS Keychain wrap ──────────────────────────────────────────────────────
+function keychainWrap(service, plainText) {
+    if (platform() !== "darwin") {
+        throw new Error("Keychain is only available on macOS.");
+    }
+    const account = "mcp-encrypted-conn";
+    // Delete any existing entry first (ignore errors if it doesn't exist).
+    spawnSync("security", ["delete-generic-password", "-a", account, "-s", service], {
+        encoding: "utf8",
+    });
+    const result = spawnSync("security", ["add-generic-password", "-a", account, "-s", service, "-w", plainText, "-U"], { encoding: "utf8" });
+    if (result.status !== 0) {
+        const msg = (result.stderr ?? "").trim() || `security exited with ${result.status}`;
+        throw new Error(`Keychain write failed: ${msg}`);
+    }
+    return `keychain:${service}`;
+}
+// ── Shared secret storage helper ─────────────────────────────────────────────
+/**
+ * Presents platform-appropriate storage options, collects the secret, and
+ * returns the wrapped reference string (env:, dpapi:, keychain:, or plain).
+ */
+async function askSecretStorage(label, defaultEnvVar, keychainService) {
+    const choices = ["Environment variable reference (recommended)"];
+    if (platform() === "win32")
+        choices.push("DPAPI-encrypted (Windows)");
+    if (platform() === "darwin")
+        choices.push("macOS Keychain");
+    choices.push("Plain text (not recommended)");
+    const storeMethod = await askChoice(`How to store the ${label}:`, choices, 0);
+    if (storeMethod.startsWith("Environment")) {
+        const envVar = await ask("Environment variable name", defaultEnvVar);
+        console.log(`\n  ⚠ Make sure to set: $env:${envVar} = "<your-${label}>"\n`);
+        return `env:${envVar}`;
+    }
+    if (storeMethod.startsWith("DPAPI")) {
+        const secret = await ask(`${label} (will be encrypted)`);
+        const wrapped = dpapiWrap(secret);
+        console.log(`  ✓ ${label} DPAPI-encrypted.`);
+        return wrapped;
+    }
+    if (storeMethod.startsWith("macOS")) {
+        const service = keychainService ?? `origo-bc-mcp-${defaultEnvVar.toLowerCase()}`;
+        const secret = await ask(`${label} (will be stored in Keychain)`);
+        const ref = keychainWrap(service, secret);
+        console.log(`  ✓ ${label} stored in macOS Keychain (service: ${service}).`);
+        return ref;
+    }
+    // Plain text fallback
+    return await ask(`${label} (will be stored in plaintext!)`);
+}
+/**
+ * Wraps an already-known secret value using platform-appropriate storage.
+ * Used when the setup flow already has the value (e.g. device-code refresh token).
+ */
+async function wrapKnownSecret(label, value, defaultEnvVar, keychainService) {
+    const choices = ["Environment variable reference (recommended)"];
+    if (platform() === "win32")
+        choices.push("DPAPI-encrypted (Windows)");
+    if (platform() === "darwin")
+        choices.push("macOS Keychain");
+    choices.push("Plain text (not recommended)");
+    const storeMethod = await askChoice(`How to store the new ${label}:`, choices, 0);
+    if (storeMethod.startsWith("Environment")) {
+        const envVar = await ask("Environment variable name", defaultEnvVar);
+        console.log(`\n  ⚠ Set the environment variable now:`);
+        console.log(`    [Environment]::SetEnvironmentVariable('${envVar}', '<token>', 'User')`);
+        copyToClipboard(value);
+        return `env:${envVar}`;
+    }
+    if (storeMethod.startsWith("DPAPI")) {
+        const wrapped = dpapiWrap(value);
+        console.log(`  ✓ ${label} DPAPI-encrypted and stored in config.`);
+        return wrapped;
+    }
+    if (storeMethod.startsWith("macOS")) {
+        const service = keychainService ?? `origo-bc-mcp-${defaultEnvVar.toLowerCase()}`;
+        const ref = keychainWrap(service, value);
+        console.log(`  ✓ ${label} stored in macOS Keychain (service: ${service}).`);
+        return ref;
+    }
+    // Plain text
+    return value;
 }
 function copyToClipboard(text) {
     try {
@@ -291,42 +353,10 @@ export async function runSetup() {
         let clientSecret;
         let refreshToken;
         if (authFlow.startsWith("Client secret")) {
-            const storeMethod = await askChoice("How to store the secret:", [
-                "Environment variable reference (recommended)",
-                "DPAPI-encrypted (Windows only)",
-                "Plain text (not recommended)",
-            ], 0);
-            if (storeMethod.startsWith("Environment")) {
-                const envVar = await ask("Environment variable name", "BC_DEV_CLIENT_SECRET");
-                clientSecret = `env:${envVar}`;
-                console.log(`\n  ⚠ Make sure to set: $env:${envVar} = "<your-secret>"\n`);
-            }
-            else if (storeMethod.startsWith("DPAPI")) {
-                console.log("\n  Use Create-ConnectionString.ps1 to generate a DPAPI blob,");
-                console.log("  then paste the dpapi:... value here.\n");
-                clientSecret = await ask("DPAPI value (dpapi:...)");
-            }
-            else {
-                clientSecret = await ask("Client secret (will be stored in plaintext!)");
-            }
+            clientSecret = await askSecretStorage("client secret", "BC_DEV_CLIENT_SECRET", `origo-bc-mcp-${connName}-secret`);
         }
         else if (authFlow.startsWith("Device code")) {
-            const storeMethod = await askChoice("How to store the refresh token:", [
-                "Environment variable reference (recommended)",
-                "DPAPI-encrypted (Windows only)",
-                "Plain text (not recommended)",
-            ], 0);
-            if (storeMethod.startsWith("Environment")) {
-                const envVar = await ask("Environment variable name", "BC_DEV_REFRESH_TOKEN");
-                refreshToken = `env:${envVar}`;
-                console.log(`\n  ⚠ Make sure to set: $env:${envVar} = "<your-token>"\n`);
-            }
-            else if (storeMethod.startsWith("DPAPI")) {
-                refreshToken = await ask("DPAPI value (dpapi:...)");
-            }
-            else {
-                refreshToken = await ask("Refresh token (will be stored in plaintext!)");
-            }
+            refreshToken = await askSecretStorage("refresh token", "BC_DEV_REFRESH_TOKEN", `origo-bc-mcp-${connName}-token`);
         }
         else {
             // env:VAR_NAME for client secret
@@ -348,19 +378,7 @@ export async function runSetup() {
         const baseUrl = await ask("BC base URL (e.g. https://host:443/BC/rest)");
         const onPremTenant = await ask("On-prem tenant", "default");
         const user = await ask("Web service user");
-        const storeMethod = await askChoice("How to store the web service key:", [
-            "Environment variable reference (recommended)",
-            "Plain text",
-        ], 0);
-        let key;
-        if (storeMethod.startsWith("Environment")) {
-            const envVar = await ask("Environment variable name", "BC_DEV_WS_KEY");
-            key = `env:${envVar}`;
-            console.log(`\n  ⚠ Make sure to set: $env:${envVar} = "<your-key>"\n`);
-        }
-        else {
-            key = await ask("Web service access key");
-        }
+        const key = await askSecretStorage("web service key", "BC_DEV_WS_KEY", `origo-bc-mcp-${connName}-wskey`);
         const environment = await ask("Environment label", "onprem");
         const companyId = await ask("Company ID (GUID, optional)");
         const companyName = await ask("Company name (optional)");
@@ -371,7 +389,7 @@ export async function runSetup() {
             connection.companyName = companyName;
     }
     // Step 2b: Validate the connection
-    const validationResult = await validateAndUpdate(connection);
+    const validationResult = await validateAndUpdate(connection, connName);
     if (validationResult?.newRefreshToken) {
         connection.refreshToken = validationResult.newRefreshToken;
     }
