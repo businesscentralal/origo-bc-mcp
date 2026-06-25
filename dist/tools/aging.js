@@ -55,7 +55,11 @@ async function computeAging(t, entityType, filter, asOfDate, buckets, lcid) {
         const inner = filter.match(/^WHERE\s*\(([\s\S]*)\)$/i);
         tableView = `WHERE(Open=CONST(1),${inner ? inner[1] : filter})`;
     }
-    const { records, fetched, truncated } = await fetchAllPages(t.tenantId, t.environment, t.companyId, "Data.Records.Get", { tableName, tableView }, lcid != null ? { lcid } : {});
+    // Explicitly request the fields we need, including FlowFields (16 = Remaining Amt. LCY)
+    // that BC does not return by default.
+    // Field 1 = Entry No. (PK), 3 = Customer/Vendor No., 16 = Remaining Amt. (LCY), 37 = Due Date
+    const fieldNumbers = [1, 3, 16, 37];
+    const { records, fetched, truncated } = await fetchAllPages(t.tenantId, t.environment, t.companyId, "Data.Records.Get", { tableName, tableView, fieldNumbers }, lcid != null ? { lcid } : {});
     if (truncated) {
         return { company: t.companyName, type: entityType, error: `Too many open entries (fetched ${fetched}). Apply a filter to narrow results.`, truncated: true };
     }
@@ -73,7 +77,7 @@ async function computeAging(t, entityType, filter, asOfDate, buckets, lcid) {
         ? ["CustomerNo_", "Customer No_", "CustNo_"]
         : ["VendorNo_", "Vendor No_"]);
     const dueDateKey = findKey(allKeys, ["DueDate", "Due Date"]);
-    const remainingKey = findKey(allKeys, ["RemainingAmt_LCY_", "RemainingAmtLCY", "RemainingAmt_LCY", "Remaining Amt_ (LCY)"]);
+    const remainingKey = findKey(allKeys, ["RemainingAmt_LCY", "RemainingAmt_LCY_", "RemainingAmtLCY", "RemainingAmount", "Remaining Amt_ (LCY)"]);
     if (!noKey || !dueDateKey || !remainingKey) {
         return {
             company: t.companyName, type: entityType,
