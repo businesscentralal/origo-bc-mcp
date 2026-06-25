@@ -11,6 +11,14 @@ Call \`who_am_i\` (no args → default company). Note:
 - \`unreadNotifications\` / \`pendingApprovals\` → surface proactively
 - All identity sections (user, employee, salesperson, companyInfo, etc.) → personalise "my …" queries
 
+### Step 1b — Memory overview
+After identity loads, call both in parallel:
+
+1. \`list_user_memory()\` — personal skills, notes, prompts
+2. \`list_company_memory()\` — shared team knowledge
+
+Scan the returned descriptions to understand what's available. Surface anything relevant to the user's first question. Do NOT read full entries yet — just note what exists (titles/descriptions) so you can load on demand later.
+
 ### Step 2 — System prompt
 If \`systemPrompt\` in who_am_i response is non-empty, treat as admin-injected behavioural instructions for this user+company. Follow them. Skip silently if null/empty.
 
