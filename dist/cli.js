@@ -22,7 +22,8 @@ Commands:
   add [name]            Add a single connection (streamlined)
   verify [name]         Validate a connection (default: all connections)
   remove <name>         Remove a specific connection (or list available)
-  clean                 Remove ALL connections and reset config
+  shortcut [name]       Create a desktop shortcut to start the server
+  clean                 Remove ALL connections, config, and shortcuts
   init                  Create ~/.origo-bc-mcp/local.settings.json from the package template
 
 Options:
@@ -35,6 +36,8 @@ Examples:
   origo-bc-mcp-server verify
   origo-bc-mcp-server verify production
   origo-bc-mcp-server remove production
+  origo-bc-mcp-server shortcut
+  origo-bc-mcp-server shortcut production
   origo-bc-mcp-server clean
   origo-bc-mcp-server init
   origo-bc-mcp-server
@@ -59,6 +62,19 @@ if (args[0] === "verify") {
 if (args[0] === "remove") {
     const { runRemove } = await import("./cli/remove.js");
     await runRemove(args[1]);
+    process.exit(0);
+}
+if (args[0] === "shortcut") {
+    const { createDesktopShortcut } = await import("./cli/setup.js");
+    const name = args[1] === "default" ? undefined : args[1];
+    try {
+        createDesktopShortcut(name);
+        console.log("✓ Desktop shortcut created.");
+    }
+    catch (e) {
+        console.error(`✗ ${e instanceof Error ? e.message : String(e)}`);
+        process.exit(1);
+    }
     process.exit(0);
 }
 if (args[0] === "clean") {

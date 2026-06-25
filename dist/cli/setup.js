@@ -5,7 +5,7 @@
  *   1. config/local.settings.json (or ~/.origo-bc-mcp/local.settings.json)
  *   2. %APPDATA%/Code/User/mcp.json (VS Code MCP config)
  */
-import { existsSync, readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { existsSync, readFileSync, writeFileSync, mkdirSync, readdirSync, unlinkSync } from "node:fs";
 import { join, resolve, dirname } from "node:path";
 import { homedir, platform } from "node:os";
 import { createInterface } from "node:readline";
@@ -255,7 +255,7 @@ function copyToClipboard(text) {
     return false;
 }
 // ── Desktop shortcut creation ────────────────────────────────────────────────
-function getDesktopPath() {
+export function getDesktopPath() {
     if (platform() === "win32") {
         // Query the actual Desktop path (handles OneDrive folder redirection).
         const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
@@ -269,7 +269,47 @@ function getDesktopPath() {
     }
     return join(homedir(), "Desktop");
 }
-function createDesktopShortcut(connectionName) {
+/** Returns the expected shortcut file path for a given connection name. */
+export function getShortcutPath(connectionName) {
+    const desktop = getDesktopPath();
+    const label = connectionName ? `Origo BC MCP (${connectionName})` : "Origo BC MCP Server";
+    if (platform() === "win32") {
+        return join(desktop, `${label}.lnk`);
+    }
+    else if (platform() === "darwin") {
+        return join(desktop, `${label}.command`);
+    }
+    else {
+        return join(desktop, `origo-bc-mcp${connectionName ? `-${connectionName}` : ""}.desktop`);
+    }
+}
+/** Removes the desktop shortcut for a given connection name. Returns true if removed. */
+export function removeDesktopShortcut(connectionName) {
+    const path = getShortcutPath(connectionName);
+    if (existsSync(path)) {
+        unlinkSync(path);
+        return true;
+    }
+    return false;
+}
+/** Finds all origo-bc-mcp shortcuts on the Desktop. */
+export function findAllShortcuts() {
+    const desktop = getDesktopPath();
+    if (!existsSync(desktop))
+        return [];
+    const entries = [];
+    try {
+        const files = readdirSync(desktop, { encoding: "utf8" });
+        for (const f of files) {
+            if (f.startsWith("Origo BC MCP") && (f.endsWith(".lnk") || f.endsWith(".command") || f.endsWith(".desktop"))) {
+                entries.push(join(desktop, f));
+            }
+        }
+    }
+    catch { /* non-fatal */ }
+    return entries;
+}
+export function createDesktopShortcut(connectionName) {
     const desktop = getDesktopPath();
     if (!existsSync(desktop)) {
         throw new Error(`Desktop folder not found: ${desktop}`);

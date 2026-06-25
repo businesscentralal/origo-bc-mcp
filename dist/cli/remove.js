@@ -9,6 +9,7 @@ import { existsSync, readFileSync, writeFileSync, unlinkSync } from "node:fs";
 import { resolve, join } from "node:path";
 import { homedir, platform } from "node:os";
 import { createInterface } from "node:readline";
+import { findAllShortcuts } from "./setup.js";
 // ── Paths ────────────────────────────────────────────────────────────────────
 function getVSCodeMcpPath() {
     switch (platform()) {
@@ -156,6 +157,11 @@ export async function runClean() {
     if (origoServers.length > 0) {
         console.log(`  • MCP server entries: ${origoServers.join(", ")}`);
     }
+    const shortcuts = findAllShortcuts();
+    if (shortcuts.length > 0) {
+        console.log(`  • Desktop shortcuts: ${shortcuts.length}`);
+        shortcuts.forEach((s) => console.log(`    ${s}`));
+    }
     console.log("");
     const yes = await confirm("Remove all origo-bc-mcp-server configuration?");
     if (!yes) {
@@ -174,6 +180,16 @@ export async function runClean() {
         }
         writeJson(mcpPath, mcpConfig);
         console.log(`✓ Removed ${origoServers.length} server entries from ${mcpPath}`);
+    }
+    // Remove desktop shortcuts
+    if (shortcuts.length > 0) {
+        for (const shortcut of shortcuts) {
+            try {
+                unlinkSync(shortcut);
+            }
+            catch { /* non-fatal */ }
+        }
+        console.log(`✓ Removed ${shortcuts.length} desktop shortcut(s)`);
     }
     console.log("\n  Run 'origo-bc-mcp-server setup' to reconfigure.\n");
 }
