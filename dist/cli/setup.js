@@ -257,7 +257,14 @@ function copyToClipboard(text) {
 // ── Desktop shortcut creation ────────────────────────────────────────────────
 function getDesktopPath() {
     if (platform() === "win32") {
-        // Use the known shell folder; fallback to USERPROFILE\Desktop.
+        // Query the actual Desktop path (handles OneDrive folder redirection).
+        const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command",
+            "[Environment]::GetFolderPath('Desktop')"], { encoding: "utf8", windowsHide: true });
+        const shellPath = (result.stdout ?? "").trim();
+        if (result.status === 0 && shellPath && existsSync(shellPath)) {
+            return shellPath;
+        }
+        // Fallback to USERPROFILE\Desktop.
         return join(process.env.USERPROFILE ?? homedir(), "Desktop");
     }
     return join(homedir(), "Desktop");
