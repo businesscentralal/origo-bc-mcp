@@ -16,62 +16,46 @@ const ENTITIES = [
     { name: "search_fixed_assets", title: "Search fixed assets", table: "Fixed Asset", searchFields: ["No.", "Description", "Search Description", "Serial No."], resultFields: ["No.", "Description", "FA Class Code", "FA Subclass Code", "Serial No.", "Inactive"], description: "Search for fixed assets by number, description, or serial number." },
     { name: "search_projects", title: "Search projects", table: "Job", searchFields: ["No.", "Description", "Search Description", "Bill-to Customer No."], resultFields: ["No.", "Description", "Status", "Bill-to Customer No.", "Person Responsible", "Project Manager"], description: "Search for projects (jobs) by number, description, or customer." },
 ];
-async function multiFieldSearch(tenantId, environment, companyId, table, searchFields, resultFields, query, take, lcid) {
-    // Resolve field names to numbers
-    const fieldsResult = await bcTask(tenantId, environment, companyId, {
-        specversion: "1.0",
-        type: "Help.Fields.Get",
-        source: MCP_SOURCE,
-        data: JSON.stringify({ tableName: table }),
-        lcid,
-    });
-    const allFields = (fieldsResult.result ?? fieldsResult.value ?? []);
-    const nameToNo = new Map();
-    for (const f of allFields) {
-        const no = Number(f.id ?? f.number ?? f.fieldNo);
-        const name = String(f.name ?? "").trim();
-        if (no >= 1 && name)
-            nameToNo.set(name.toLowerCase(), no);
+/**
+ * Multi-field search: calls Data.Records.Get once per search field with a proper
+ * BC tableView filter `WHERE(FieldName=FILTER(@*query*))`, deduplicates by record
+ * id/primaryKey across fields, and returns up to `take` results.
+ *
+ * BC does not support OR across different fields in a single SetView expression,
+ * so we fan out one request per search field and merge client-side.
+ */
+async function multiFieldSearch(tenantId, environment, companyId, table, searchFields, _resultFields, // kept for API compatibility — BC returns full records
+query, take, lcid) {
+    // Escape query for BC FILTER — * and @ are filter wildcards, sanitise user input
+    const escapedQuery = query.replace(/[*@<>{}()]/g, "");
+    const seen = new Set();
+    const allResults = [];
+    for (const fieldName of searchFields) {
+        if (allResults.length >= take)
+            break;
+        const tableView = `WHERE(${fieldName}=FILTER(@*${escapedQuery}*))`;
+        try {
+            const result = await bcTask(tenantId, environment, companyId, {
+                specversion: "1.0",
+                type: "Data.Records.Get",
+                source: MCP_SOURCE,
+                data: JSON.stringify({ tableName: table, tableView, skip: 0, take }),
+                lcid,
+            });
+            const records = (result.result ?? result.value ?? []);
+            for (const r of records) {
+                const id = String(r.id ?? JSON.stringify(r.primaryKey ?? {}));
+                if (!seen.has(id)) {
+                    seen.add(id);
+                    allResults.push(r);
+                }
+            }
+        }
+        catch {
+            // Skip fields whose filter is rejected by BC (e.g. non-filterable fields)
+        }
     }
-    const searchFieldNos = searchFields
-        .map((n) => nameToNo.get(n.toLowerCase()))
-        .filter((n) => n !== undefined);
-    const resultFieldNos = resultFields
-        .map((n) => nameToNo.get(n.toLowerCase()))
-        .filter((n) => n !== undefined);
-    // Build search filter — search each field for the query substring
-    const filterParts = searchFieldNos.map((no) => `Field${no}=@*${query}*`);
-    const tableView = filterParts.length ? `WHERE(${filterParts.join("|")})` : undefined;
-    const baseData = {
-        tableName: table,
-        skip: 0,
-        take,
-        ...(resultFieldNos.length ? { fieldNumbers: resultFieldNos } : {}),
-    };
-    // Try search approach - simple filter first
-    try {
-        const result = await bcTask(tenantId, environment, companyId, {
-            specversion: "1.0",
-            type: "Data.Search",
-            source: MCP_SOURCE,
-            data: JSON.stringify({ ...baseData, query: String(query) }),
-            lcid,
-        });
-        return (result.result ?? result.value ?? []);
-    }
-    catch {
-        // Fallback to Data.Records.Get with filter
-        if (tableView)
-            baseData.tableView = tableView;
-        const result = await bcTask(tenantId, environment, companyId, {
-            specversion: "1.0",
-            type: "Data.Records.Get",
-            source: MCP_SOURCE,
-            data: JSON.stringify(baseData),
-            lcid,
-        });
-        return (result.result ?? result.value ?? []);
-    }
+    return allResults.slice(0, take);
 }
 export function registerSearchTools(server) {
     // ── Entity-specific search tools ────────────────────────────────────────
