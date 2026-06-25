@@ -170,14 +170,14 @@ async function listBcCompanies(token, tenantId, environment) {
 async function validateOnPrem(conn) {
     const baseUrl = conn.baseUrl.replace(/\/+$/, "");
     const tenant = conn.onPremTenant ?? "default";
-    const url = `${baseUrl}/api/v2.0/companies`;
+    const separator = baseUrl.includes("?") ? "&" : "?";
+    const url = `${baseUrl}/api/v2.0/companies${separator}tenant=${tenant}`;
     const authHeader = "Basic " + Buffer.from(`${conn.user}:${conn.key}`).toString("base64");
     try {
         const res = await fetch(url, {
             headers: {
                 Authorization: authHeader,
                 Accept: "application/json",
-                ...(tenant !== "default" && { "Tenant-Id": tenant }),
             },
             // On-prem may have self-signed certs; the user can set NODE_TLS_REJECT_UNAUTHORIZED=0.
         });
