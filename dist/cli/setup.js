@@ -10,7 +10,7 @@ import { join, resolve, dirname } from "node:path";
 import { homedir, platform } from "node:os";
 import { createInterface } from "node:readline";
 import { spawnSync } from "node:child_process";
-import { validateConnection } from "./validate.js";
+import { validateConnection, deviceCodeFlow } from "./validate.js";
 import { resolveSecret } from "../config/resolveSecret.js";
 // ── Paths ────────────────────────────────────────────────────────────────────
 function getVSCodeMcpPath() {
@@ -403,7 +403,9 @@ export async function runSetup() {
             clientSecret = await askSecretStorage("client secret", "BC_DEV_CLIENT_SECRET", `origo-bc-mcp-${connName}-secret`);
         }
         else if (authFlow.startsWith("Device code")) {
-            refreshToken = await askSecretStorage("refresh token", "BC_DEV_REFRESH_TOKEN", `origo-bc-mcp-${connName}-token`);
+            console.log("\n  Starting device code authentication...");
+            const rawToken = await deviceCodeFlow(tenantId, clientId);
+            refreshToken = await wrapKnownSecret("refresh token", rawToken, "BC_DEV_REFRESH_TOKEN", `origo-bc-mcp-${connName}-token`);
         }
         else {
             // env:VAR_NAME for client secret
@@ -583,7 +585,9 @@ export async function runAdd(name) {
             clientSecret = await askSecretStorage("client secret", "BC_DEV_CLIENT_SECRET", `origo-bc-mcp-${connName}-secret`);
         }
         else if (authFlow.startsWith("Device code")) {
-            refreshToken = await askSecretStorage("refresh token", "BC_DEV_REFRESH_TOKEN", `origo-bc-mcp-${connName}-token`);
+            console.log("\n  Starting device code authentication...");
+            const rawToken = await deviceCodeFlow(tenantId, clientId);
+            refreshToken = await wrapKnownSecret("refresh token", rawToken, "BC_DEV_REFRESH_TOKEN", `origo-bc-mcp-${connName}-token`);
         }
         else {
             const envVar = await ask("Environment variable name for client secret", "BC_DEV_CLIENT_SECRET");
