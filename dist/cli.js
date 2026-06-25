@@ -19,7 +19,10 @@ if (args.includes("--help") || args.includes("-h")) {
 
 Commands:
   setup                 Guided wizard to configure connections and VS Code mcp.json
+  add [name]            Add a single connection (streamlined)
   verify [name]         Validate a connection (default: all connections)
+  remove <name>         Remove a specific connection (or list available)
+  clean                 Remove ALL connections and reset config
   init                  Create ~/.origo-bc-mcp/local.settings.json from the package template
 
 Options:
@@ -28,8 +31,11 @@ Options:
 
 Examples:
   origo-bc-mcp-server setup
+  origo-bc-mcp-server add production
   origo-bc-mcp-server verify
   origo-bc-mcp-server verify production
+  origo-bc-mcp-server remove production
+  origo-bc-mcp-server clean
   origo-bc-mcp-server init
   origo-bc-mcp-server
   origo-bc-mcp-server --config ./config/local.settings.json`);
@@ -40,9 +46,24 @@ if (args[0] === "setup") {
     await runSetup();
     process.exit(0);
 }
+if (args[0] === "add") {
+    const { runAdd } = await import("./cli/setup.js");
+    await runAdd(args[1]);
+    process.exit(0);
+}
 if (args[0] === "verify") {
     const { runVerify } = await import("./cli/verifyCommand.js");
     await runVerify(args[1]);
+    process.exit(0);
+}
+if (args[0] === "remove") {
+    const { runRemove } = await import("./cli/remove.js");
+    await runRemove(args[1]);
+    process.exit(0);
+}
+if (args[0] === "clean") {
+    const { runClean } = await import("./cli/remove.js");
+    await runClean();
     process.exit(0);
 }
 if (args[0] === "init") {

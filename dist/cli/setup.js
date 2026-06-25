@@ -505,4 +505,106 @@ export async function runSetup() {
     console.log("");
     rl.close();
 }
+// ── Focused "add" command ────────────────────────────────────────────────────
+/**
+ * Streamlined command to add a single connection.
+ * Skips basic auth, desktop shortcut, and setup connection selection.
+ */
+export async function runAdd(name) {
+    console.log("\n── Add Connection ──\n");
+    const localPath = getLocalSettingsPath();
+    const mcpPath = getVSCodeMcpPath();
+    const settings = readLocalSettings(localPath);
+    // Connection name (required)
+    const connName = name || await ask("Connection name", "default");
+    const isDefault = connName === "default";
+    // Check for existing connection
+    if (isDefault && settings.devConnection) {
+        console.log(`  ⚠ Connection "default" already exists. This will overwrite it.`);
+    }
+    else if (!isDefault && settings.connections?.[connName]) {
+        console.log(`  ⚠ Connection "${connName}" already exists. This will overwrite it.`);
+    }
+    // Connection type
+    const connType = await askChoice("Connection type:", ["SaaS (Entra ID)", "On-prem (Basic auth)"], 0);
+    const isSaaS = connType.startsWith("SaaS");
+    let connection;
+    if (isSaaS) {
+        const tenantId = await ask("Entra tenant ID (GUID)");
+        const clientId = await ask("App registration client ID (GUID)");
+        const authFlow = await askChoice("Authentication flow:", [
+            "Client secret",
+            "Device code (refresh token)",
+            "Environment variable (env:VAR_NAME)",
+        ], 0);
+        let clientSecret;
+        let refreshToken;
+        if (authFlow.startsWith("Client secret")) {
+            clientSecret = await askSecretStorage("client secret", "BC_DEV_CLIENT_SECRET", `origo-bc-mcp-${connName}-secret`);
+        }
+        else if (authFlow.startsWith("Device code")) {
+            refreshToken = await askSecretStorage("refresh token", "BC_DEV_REFRESH_TOKEN", `origo-bc-mcp-${connName}-token`);
+        }
+        else {
+            const envVar = await ask("Environment variable name for client secret", "BC_DEV_CLIENT_SECRET");
+            clientSecret = `env:${envVar}`;
+        }
+        const environment = await ask("BC environment name", "production");
+        const companyId = await ask("Company ID (GUID, optional)");
+        connection = { tenantId, clientId, environment };
+        if (clientSecret)
+            connection.clientSecret = clientSecret;
+        if (refreshToken)
+            connection.refreshToken = refreshToken;
+        if (companyId)
+            connection.companyId = companyId;
+    }
+    else {
+        const baseUrl = await ask("BC base URL (e.g. https://host:443/BC/rest)");
+        const onPremTenant = await ask("On-prem tenant", "default");
+        const user = await ask("Web service user");
+        const key = await askSecretStorage("web service key", "BC_DEV_WS_KEY", `origo-bc-mcp-${connName}-wskey`);
+        const environment = await ask("Environment label", "onprem");
+        const companyId = await ask("Company ID (GUID, optional)");
+        const companyName = await ask("Company name (optional)");
+        connection = { onPrem: true, baseUrl, onPremTenant, user, key, environment };
+        if (companyId)
+            connection.companyId = companyId;
+        if (companyName)
+            connection.companyName = companyName;
+    }
+    // Validate
+    await validateAndUpdate(connection, connName);
+    // Save to local settings
+    if (isDefault) {
+        settings.devConnection = connection;
+    }
+    else {
+        if (!settings.connections)
+            settings.connections = {};
+        settings.connections[connName] = connection;
+    }
+    writeJson(localPath, settings);
+    console.log(`\n✓ Connection "${connName}" saved to ${localPath}`);
+    // Update VS Code mcp.json
+    const serverUrl = "http://localhost:3000/mcp";
+    const serverName = isDefault ? "origo-bc-local" : `origo-bc-${connName}`;
+    const url = isDefault ? serverUrl : `${serverUrl}?connection=${connName}`;
+    const ba = settings.basicAuth;
+    const headers = {};
+    if (ba?.enabled) {
+        headers["Authorization"] = `Basic ${Buffer.from(`${ba.username}:${ba.password}`).toString("base64")}`;
+    }
+    const mcpConfig = readMcpConfig(mcpPath);
+    if (!mcpConfig.servers)
+        mcpConfig.servers = {};
+    mcpConfig.servers[serverName] = { type: "http", url, ...(Object.keys(headers).length > 0 && { headers }) };
+    writeJson(mcpPath, mcpConfig);
+    console.log(`✓ MCP entry "${serverName}" → ${url}`);
+    if (!isDefault) {
+        console.log(`\n  Select with: ?connection=${connName}`);
+    }
+    console.log("");
+    rl.close();
+}
 //# sourceMappingURL=setup.js.map
