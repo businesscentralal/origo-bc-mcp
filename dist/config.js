@@ -17,6 +17,7 @@ export const config = {
     port: Number(opt("PORT", "3000")),
     nodeEnv: opt("NODE_ENV", "development"),
     publicUrl: opt("MCP_PUBLIC_URL", "http://localhost:3000"),
+    debug: process.argv.includes("--debug") || opt("MCP_DEBUG") === "1",
     // Microsoft identity platform + service hosts
     tokenHost: opt("MSFT_HOST", "login.microsoftonline.com"),
     bcApiHost: opt("BC_API_HOST", "api.businesscentral.dynamics.com"),

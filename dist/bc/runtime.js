@@ -12,6 +12,10 @@ const FETCH_ALL_BATCH_SIZE = 1000;
 /** Hard cap on total records returned by fetchAllPages to prevent OOM on large tables. */
 const FETCH_ALL_MAX_RECORDS = 10_000;
 const MCP_SOURCE = "Origo-BC Cloud Events MCP";
+function dbg(...args) {
+    if (config.debug)
+        console.log("[BC]", ...args);
+}
 // ── Retry-capable fetch ─────────────────────────────────────────────────────
 async function bcFetch(url, init, retries = 3) {
     for (let attempt = 0; attempt <= retries; attempt++) {
@@ -96,12 +100,15 @@ export async function bcTask(tenantId, environment, companyId, envelope) {
         auth = `Bearer ${token}`;
         taskUrl = `https://${BC_HOST}/v2.0/${tenantId}/${environment}/api/origo/cloudEvent/v1.0/companies(${companyId})/tasks`;
     }
+    dbg(`POST ${taskUrl}`);
+    dbg(`  type=${envelope.type} subject=${envelope.subject || ""}`);
     const res = await bcFetch(taskUrl, {
         method: "POST",
         headers: { Authorization: auth, "Content-Type": "application/json" },
         body: JSON.stringify(envelope),
     });
     const task = (await res.json());
+    dbg(`  status=${task.status}${task.data ? " (has data URL)" : ""}`);
     if (task.status === "Error") {
         const errMsg = Array.isArray(task.error)
             ? JSON.stringify(task.error)

@@ -28,6 +28,7 @@ Commands:
 
 Options:
   --config <path>       Start with a specific local.settings.json file
+  --debug               Log all MCP requests, responses, and BC calls to console
   -h, --help            Show this help
 
 Examples:
