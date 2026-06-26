@@ -322,6 +322,13 @@ The included `Dockerfile` builds a production image with PM2 for automatic resta
 **Build the image:**
 
 ```bash
+docker build -t origo-bc-mcp https://github.com/businesscentralal/origo-bc-mcp.git
+```
+
+Or if you have the repo cloned locally:
+
+```bash
+cd origo-bc-mcp
 docker build -t origo-bc-mcp .
 ```
 
