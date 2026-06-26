@@ -6,10 +6,11 @@
  * This endpoint forwards the request, then normalizes the response.
  */
 import { Router } from "express";
-import { config } from "../config.js";
-const debug = config.debug;
+function isDebug() {
+    return process.env.MCP_DEBUG === "1";
+}
 function log(...args) {
-    if (debug)
+    if (isDebug())
         console.log("[ollama-proxy]", ...args);
 }
 const OLLAMA_BASE = process.env.OLLAMA_PROXY_TARGET || "http://192.168.16.241:11434";
@@ -20,7 +21,11 @@ export const ollamaProxyRouter = Router();
  */
 ollamaProxyRouter.post("/v1/chat/completions", async (req, res) => {
     const targetUrl = `${OLLAMA_BASE}/v1/chat/completions`;
+    const t0 = Date.now();
     log(`→ ${targetUrl} model=${req.body?.model}`);
+    // Normalize request: stringify any function.arguments objects in message history
+    // (OpenClaw may send them as objects; Ollama's Go expects strings)
+    normalizeRequestMessages(req.body);
     try {
         const ollamaRes = await fetch(targetUrl, {
             method: "POST",
@@ -57,6 +62,7 @@ ollamaProxyRouter.post("/v1/chat/completions", async (req, res) => {
             }
             finally {
                 reader.releaseLock();
+                log(`← stream done in ${Date.now() - t0}ms`);
                 res.end();
             }
             return;
@@ -64,12 +70,12 @@ ollamaProxyRouter.post("/v1/chat/completions", async (req, res) => {
         // Non-streaming: parse, normalize, return
         const body = await ollamaRes.json();
         normalizeResponse(body);
-        log(`← 200 choices=${body.choices?.length} tool_calls=${hasToolCalls(body)}`);
+        log(`← 200 in ${Date.now() - t0}ms choices=${body.choices?.length} tool_calls=${hasToolCalls(body)}`);
         res.json(body);
     }
     catch (err) {
         const msg = err.message;
-        log(`← ERROR: ${msg}`);
+        log(`← ERROR in ${Date.now() - t0}ms: ${msg}`);
         res.status(502).json({ error: `Ollama proxy error: ${msg}` });
     }
 });
@@ -125,6 +131,21 @@ function normalizeStreamChunk(chunk) {
             return `data: ${jsonStr}`;
         }
     });
+}
+/**
+ * Normalize outbound request: stringify function.arguments in message history.
+ * OpenClaw (or other clients) may send tool_calls with arguments as objects,
+ * but Ollama's Go backend requires them as strings.
+ */
+function normalizeRequestMessages(body) {
+    if (!body)
+        return;
+    const messages = body.messages;
+    if (!messages)
+        return;
+    for (const msg of messages) {
+        normalizeToolCalls(msg);
+    }
 }
 /**
  * Fix the core bug: if function.arguments is an object, stringify it.
