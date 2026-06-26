@@ -8,6 +8,7 @@ import { authMiddleware } from "./auth/middleware.js";
 import { buildServer } from "./server.js";
 import { clearSession } from "./session/store.js";
 import { dashboardRouter, setSessionTracker } from "./dashboard/index.js";
+import { ollamaProxyRouter } from "./ollama/proxy.js";
 const debug = config.debug;
 function log(...args) {
     if (debug)
@@ -100,6 +101,8 @@ setSessionTracker(() => Object.entries(transports).map(([id, t]) => ({
     created: t._createdAt ?? Date.now(),
 })));
 app.use("/dashboard", dashboardRouter);
+// --- Ollama proxy (normalizes tool call arguments) ------------------------
+app.use("/ollama", ollamaProxyRouter);
 app.listen(config.port, () => {
     console.log(`origo-bc-mcp listening on :${config.port} (${config.nodeEnv})`);
     console.log(`  MCP endpoint:    ${config.publicUrl}/mcp`);
