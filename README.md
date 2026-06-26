@@ -334,28 +334,26 @@ docker build -t origo-bc-mcp .
 
 **Run with environment variables (production / OAuth):**
 
+```powershell
+# Windows (cmd or PowerShell)
+docker run -d --name origo-bc-mcp -p 3000:3000 -e NODE_ENV=production -e BC_CLIENT_ID=<app-client-id> -e BC_CLIENT_SECRET=<client-secret> -e BC_TENANT_ID=<entra-tenant-id> -e MCP_ENCRYPTION_KEY=<64-hex-chars> -e MCP_PUBLIC_URL=https://your-domain.com origo-bc-mcp
+```
+
 ```bash
-docker run -d \
-  --name origo-bc-mcp \
-  -p 3000:3000 \
-  -e NODE_ENV=production \
-  -e BC_CLIENT_ID=<app-client-id> \
-  -e BC_CLIENT_SECRET=<client-secret> \
-  -e BC_TENANT_ID=<entra-tenant-id> \
-  -e MCP_ENCRYPTION_KEY=<64-hex-chars> \
-  -e MCP_PUBLIC_URL=https://your-domain.com \
-  origo-bc-mcp
+# macOS / Linux
+docker run -d --name origo-bc-mcp -p 3000:3000 -e NODE_ENV=production -e BC_CLIENT_ID=<app-client-id> -e BC_CLIENT_SECRET=<client-secret> -e BC_TENANT_ID=<entra-tenant-id> -e MCP_ENCRYPTION_KEY=<64-hex-chars> -e MCP_PUBLIC_URL=https://your-domain.com origo-bc-mcp
 ```
 
 **Run with a local settings file (dev / Basic auth):**
 
+```powershell
+# Windows
+docker run -d --name origo-bc-mcp -p 3000:3000 -v C:\Users\%USERNAME%\.origo-bc-mcp\local.settings.json:/app/config/local.settings.json:ro -e MCP_DEBUG=1 origo-bc-mcp
+```
+
 ```bash
-docker run -d \
-  --name origo-bc-mcp \
-  -p 3000:3000 \
-  -v /path/to/local.settings.json:/app/config/local.settings.json:ro \
-  -e MCP_DEBUG=1 \
-  origo-bc-mcp
+# macOS / Linux
+docker run -d --name origo-bc-mcp -p 3000:3000 -v ~/.origo-bc-mcp/local.settings.json:/app/config/local.settings.json:ro -e MCP_DEBUG=1 origo-bc-mcp
 ```
 
 **Environment variables reference:**
