@@ -71,11 +71,15 @@ export async function resolveTarget(overrides) {
             throw new Error(`Company '${companyOverride}' not found. Use bc_list_companies to see available companies.`);
         return { tenantId, environment, companyId: found.id, companyName: found.displayName };
     }
-    // Fall back to env-var company or first company
+    // Fall back to connection's companyId, then env vars, then first company
+    const connId = ctx.conn.companyId;
     const envId = process.env.BC_COMPANY_ID;
     const envName = (process.env.BC_COMPANY_NAME ?? "").toLowerCase();
     let company;
-    if (envId) {
+    if (connId) {
+        company = companies.find((c) => c.id.toLowerCase() === connId.toLowerCase());
+    }
+    else if (envId) {
         company = companies.find((c) => c.id.toLowerCase() === envId.toLowerCase());
     }
     else if (envName) {

@@ -4,6 +4,7 @@ import { runWithAuth } from "./context.js";
 import { verifyBearer } from "./entra.js";
 import { connectionFromOrigoToken } from "./origoToken.js";
 import { getLocalSettings, getConnection, isBasicAuthEnabled } from "../config/localSettings.js";
+import { getSelection, setSelection } from "../session/store.js";
 function header(req, name) {
     const v = req.headers[name];
     return Array.isArray(v) ? v[0] : v;
@@ -125,6 +126,18 @@ async function buildContext(req) {
 export function authMiddleware(req, res, next) {
     buildContext(req)
         .then((ctx) => {
+        // Auto-seed session selection from connection config on first request.
+        if (ctx.sessionId && ctx.conn.tenantId) {
+            const sel = getSelection(ctx.sessionId);
+            if (!sel.tenantId && !sel.environment && !sel.companyId) {
+                setSelection(ctx.sessionId, {
+                    tenantId: ctx.conn.tenantId,
+                    environment: ctx.conn.environment,
+                    companyId: ctx.conn.companyId,
+                    companyName: ctx.conn.companyName,
+                });
+            }
+        }
         runWithAuth(ctx, () => next());
     })
         .catch((err) => {
