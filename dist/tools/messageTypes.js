@@ -34,7 +34,7 @@ export function registerMessageTypeTools(server) {
         const t = await resolveTarget({ companyId });
         const result = await bcTask(t.tenantId, t.environment, t.companyId, {
             specversion: "1.0",
-            type: "Help.MessageType.Get",
+            type: "Help.Implementation.Get",
             source: MCP_SOURCE,
             subject: String(messageType),
             ...(lcid != null ? { lcid } : {}),
@@ -76,7 +76,7 @@ export function registerMessageTypeTools(server) {
             try {
                 const helpResult = await bcTask(t.tenantId, t.environment, t.companyId, {
                     specversion: "1.0",
-                    type: "Help.MessageType.Get",
+                    type: "Help.Implementation.Get",
                     source: MCP_SOURCE,
                     subject: String(msgType),
                 });
