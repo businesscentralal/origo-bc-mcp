@@ -13,6 +13,8 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { validateConnection } from "../cli/validate.js";
 import { encryptSecret, canEncryptSecrets } from "../config/resolveSecret.js";
+const TOKEN_HOST = "login.microsoftonline.com";
+const BC_SCOPE = "https://api.businesscentral.dynamics.com/.default";
 const router = Router();
 // ── Config file path resolution ──────────────────────────────────────────────
 function getConfigPath() {
@@ -183,6 +185,105 @@ router.delete("/api/connections/:name", (req, res) => {
     writeConfig(config);
     res.json({ ok: true });
 });
+// ── Device Code Flow (browser-friendly) ──────────────────────────────────────
+// Active device code sessions (keyed by a random session ID)
+const deviceCodeSessions = new Map();
+/**
+ * Step 1: Start device code flow — returns user_code + verification_uri.
+ * The UI shows these to the user and starts polling step 2.
+ */
+router.post("/api/device-code/start", async (req, res) => {
+    const { tenantId, clientId } = req.body;
+    if (!tenantId || !clientId) {
+        res.status(400).json({ ok: false, error: "tenantId and clientId are required" });
+        return;
+    }
+    try {
+        const dcRes = await fetch(`https://${TOKEN_HOST}/${tenantId}/oauth2/v2.0/devicecode`, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({ client_id: clientId, scope: `${BC_SCOPE} offline_access` }),
+        });
+        const dc = await dcRes.json();
+        if (!dc.device_code) {
+            res.json({ ok: false, error: dc.error_description || dc.error || "Device code request failed — check tenantId and clientId." });
+            return;
+        }
+        // Store session for polling
+        const sessionId = crypto.randomUUID();
+        deviceCodeSessions.set(sessionId, {
+            deviceCode: dc.device_code,
+            clientId,
+            tenantId,
+            interval: Math.max(dc.interval || 5, 5),
+            expiresAt: Date.now() + (dc.expires_in || 900) * 1000,
+        });
+        // Auto-cleanup after expiry
+        setTimeout(() => deviceCodeSessions.delete(sessionId), (dc.expires_in || 900) * 1000 + 5000);
+        res.json({
+            ok: true,
+            sessionId,
+            userCode: dc.user_code,
+            verificationUri: dc.verification_uri,
+            message: dc.message,
+            expiresIn: dc.expires_in,
+            interval: Math.max(dc.interval || 5, 5),
+        });
+    }
+    catch (err) {
+        res.json({ ok: false, error: err.message });
+    }
+});
+/**
+ * Step 2: Poll for token — call this repeatedly until it returns a refresh_token or error.
+ */
+router.post("/api/device-code/poll", async (req, res) => {
+    const { sessionId } = req.body;
+    if (!sessionId) {
+        res.status(400).json({ ok: false, error: "sessionId is required" });
+        return;
+    }
+    const session = deviceCodeSessions.get(sessionId);
+    if (!session) {
+        res.json({ ok: false, error: "Session expired or not found. Start a new device code flow." });
+        return;
+    }
+    if (Date.now() > session.expiresAt) {
+        deviceCodeSessions.delete(sessionId);
+        res.json({ ok: false, error: "Device code expired. Start a new flow." });
+        return;
+    }
+    try {
+        const tokRes = await fetch(`https://${TOKEN_HOST}/${session.tenantId}/oauth2/v2.0/token`, {
+            method: "POST",
+            headers: { "Content-Type": "application/x-www-form-urlencoded" },
+            body: new URLSearchParams({
+                client_id: session.clientId,
+                grant_type: "urn:ietf:params:oauth:grant-type:device_code",
+                device_code: session.deviceCode,
+            }),
+        });
+        const tok = await tokRes.json();
+        if (tok.refresh_token) {
+            deviceCodeSessions.delete(sessionId);
+            res.json({ ok: true, refreshToken: tok.refresh_token });
+            return;
+        }
+        if (tok.error === "authorization_pending") {
+            res.json({ ok: false, pending: true });
+            return;
+        }
+        if (tok.error === "slow_down") {
+            res.json({ ok: false, pending: true, slowDown: true });
+            return;
+        }
+        deviceCodeSessions.delete(sessionId);
+        res.json({ ok: false, error: tok.error_description || tok.error || "Token request failed" });
+    }
+    catch (err) {
+        res.json({ ok: false, error: err.message });
+    }
+});
 // ── HTML page ────────────────────────────────────────────────────────────────
 router.get("/", (_req, res) => {
     res.type("html").send(SETUP_HTML);
@@ -229,6 +330,17 @@ const SETUP_HTML = `<!DOCTYPE html>
   .btn.danger { color: var(--red); }
   .btn.danger:hover { border-color: var(--red); }
   .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+  .btn-sm { padding: 4px 10px; font-size: 12px; border: 1px solid var(--border); border-radius: 4px; background: var(--surface); color: var(--blue); cursor: pointer; }
+  .btn-sm:hover { border-color: var(--blue); background: #1f6feb22; }
+  .modal-overlay { display:none; position:fixed; inset:0; background:rgba(0,0,0,0.7); z-index:1000; align-items:center; justify-content:center; }
+  .modal-overlay.active { display:flex; }
+  .modal { background:var(--surface); border:1px solid var(--border); border-radius:12px; padding:24px; width:100%; max-width:440px; text-align:center; }
+  .modal h3 { margin-bottom:12px; font-size:16px; }
+  .modal .user-code { font-family:monospace; font-size:28px; letter-spacing:4px; color:var(--blue); margin:16px 0; padding:12px; background:var(--bg); border-radius:8px; border:1px solid var(--border); user-select:all; }
+  .modal .hint { color:var(--dim); font-size:13px; margin-bottom:16px; }
+  .modal .status { color:var(--dim); font-size:13px; margin-top:12px; }
+  .modal .status.error { color:var(--red); }
+  .modal .status.success { color:var(--green); }
   .form-section { margin-top: 20px; }
   .form-section h2 { font-size: 16px; margin-bottom: 12px; }
   .form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px; }
@@ -287,7 +399,7 @@ const SETUP_HTML = `<!DOCTYPE html>
     <div class="form-group"><label>Tenant ID</label><input type="text" id="tenantId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"></div>
     <div class="form-group"><label>Client ID</label><input type="text" id="clientId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"></div>
     <div class="form-group"><label>Client Secret</label><input type="password" id="clientSecret" placeholder="Secret or env:VAR_NAME"><span class="hint">Leave blank if using refresh token</span></div>
-    <div class="form-group"><label>Refresh Token</label><input type="password" id="refreshToken" placeholder="Leave blank if using client secret"><span class="hint">For delegated access (device code flow)</span></div>
+    <div class="form-group"><label>Refresh Token</label><input type="password" id="refreshToken" placeholder="Leave blank if using client secret"><span class="hint">For delegated access (device code flow)</span><button type="button" class="btn-sm" onclick="startDeviceCode()" id="dc-btn" style="margin-top:4px">🔑 Get Refresh Token</button></div>
     <div class="form-group"><label>Environment</label><input type="text" id="saas-env" placeholder="production" value="production"></div>
     <div class="form-group"><label>Company ID</label><input type="text" id="saas-companyId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"><span class="hint">Optional — limits to one company</span></div>
   </div>
@@ -311,8 +423,8 @@ const SETUP_HTML = `<!DOCTYPE html>
 </div>
 
 <div class="basic-auth-section">
-  <h3>Basic Auth (dev only)</h3>
-  <p style="font-size:12px;color:var(--dim);margin-bottom:12px">HTTP Basic auth for local development. Disabled when NODE_ENV=production.</p>
+  <h3>Basic Auth</h3>
+  <p style="font-size:12px;color:var(--dim);margin-bottom:12px">Secures MCP endpoints and the dashboard. Same credentials used for MCP client access.</p>
   <div class="toggle-row">
     <input type="checkbox" id="ba-enabled">
     <label for="ba-enabled" style="font-size:13px">Enable Basic Auth</label>
@@ -473,8 +585,101 @@ async function saveBasicAuth() {
   if (d.ok) el.innerHTML = '<div class="result ok" style="margin-top:8px">✓ Saved</div>';
 }
 
+// ── Device Code Flow ──────────────────────────────────────────────────────────
+let dcPollTimer = null;
+
+async function startDeviceCode() {
+  const tenantId = document.getElementById('tenantId').value.trim();
+  const clientId = document.getElementById('clientId').value.trim();
+  if (!tenantId || !clientId) {
+    alert('Fill in Tenant ID and Client ID first.');
+    return;
+  }
+
+  const modal = document.getElementById('dc-modal');
+  const statusEl = document.getElementById('dc-status');
+  const codeEl = document.getElementById('dc-code');
+  const linkEl = document.getElementById('dc-link');
+  statusEl.className = 'status';
+  statusEl.textContent = 'Starting…';
+  codeEl.textContent = '…';
+  modal.classList.add('active');
+
+  try {
+    const r = await fetch('/dashboard/setup/api/device-code/start', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ tenantId, clientId })
+    });
+    const d = await r.json();
+    if (!d.ok) { statusEl.textContent = d.error; statusEl.className = 'status error'; return; }
+
+    codeEl.textContent = d.userCode;
+    linkEl.href = d.verificationUri;
+    linkEl.textContent = d.verificationUri;
+    statusEl.textContent = 'Waiting for you to sign in…';
+
+    // Open verification URL in new tab
+    window.open(d.verificationUri, '_blank');
+
+    // Start polling
+    const interval = (d.interval || 5) * 1000;
+    dcPollTimer = setInterval(() => pollDeviceCode(d.sessionId, statusEl, modal), interval);
+  } catch (e) {
+    statusEl.textContent = e.message;
+    statusEl.className = 'status error';
+  }
+}
+
+async function pollDeviceCode(sessionId, statusEl, modal) {
+  try {
+    const r = await fetch('/dashboard/setup/api/device-code/poll', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ sessionId })
+    });
+    const d = await r.json();
+
+    if (d.ok && d.refreshToken) {
+      clearInterval(dcPollTimer);
+      document.getElementById('refreshToken').value = d.refreshToken;
+      statusEl.textContent = '✓ Got refresh token!';
+      statusEl.className = 'status success';
+      setTimeout(() => modal.classList.remove('active'), 1500);
+      return;
+    }
+    if (d.pending) {
+      statusEl.textContent = 'Waiting for you to sign in…';
+      return;
+    }
+    // Error
+    clearInterval(dcPollTimer);
+    statusEl.textContent = d.error || 'Failed';
+    statusEl.className = 'status error';
+  } catch (e) {
+    clearInterval(dcPollTimer);
+    statusEl.textContent = e.message;
+    statusEl.className = 'status error';
+  }
+}
+
+function closeDcModal() {
+  clearInterval(dcPollTimer);
+  document.getElementById('dc-modal').classList.remove('active');
+}
+
 loadConnections();
 </script>
+
+<!-- Device Code Modal -->
+<div class="modal-overlay" id="dc-modal">
+  <div class="modal">
+    <h3>🔑 Device Code Sign-In</h3>
+    <p class="hint">Enter this code at the Microsoft sign-in page:</p>
+    <div class="user-code" id="dc-code">…</div>
+    <p class="hint"><a id="dc-link" href="#" target="_blank" style="color:var(--blue)">https://microsoft.com/devicelogin</a></p>
+    <p class="status" id="dc-status">Starting…</p>
+    <button class="btn" onclick="closeDcModal()" style="margin-top:16px">Cancel</button>
+  </div>
+</div>
 </body>
 </html>`;
 //# sourceMappingURL=setup.js.map
