@@ -346,7 +346,7 @@ docker build -t origo-bc-mcp https://github.com/businesscentralal/origo-bc-mcp.g
 Mount a local folder for persistent config storage:
 
 ```powershell
-docker run -d --name origo-bc-mcp -p 3000:3000 -v E:\Docker Storage\origo-bc-mcp:/data -e MCP_ENCRYPTION_KEY=<64-hex-chars> -e MCP_ADMIN_USER=admin -e MCP_ADMIN_PASSWORD=<your-password> origo-bc-mcp
+docker run -d --name origo-bc-mcp -p 3000:3000 -v "E:\Docker Storage\origo-bc-mcp:/data" -e MCP_ENCRYPTION_KEY=<64-hex-chars> -e MCP_ADMIN_USER=admin -e MCP_ADMIN_PASSWORD=<your-password> origo-bc-mcp
 ```
 
 ```bash
