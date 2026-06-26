@@ -315,6 +315,87 @@ into `src/tools/`, then deploy to dev via Azure DevOps.
 
 ## Local install
 
+### Run with Docker
+
+The included `Dockerfile` builds a production image with PM2 for automatic restarts.
+
+**Build the image:**
+
+```bash
+docker build -t origo-bc-mcp .
+```
+
+**Run with environment variables (production / OAuth):**
+
+```bash
+docker run -d \
+  --name origo-bc-mcp \
+  -p 3000:3000 \
+  -e NODE_ENV=production \
+  -e BC_CLIENT_ID=<app-client-id> \
+  -e BC_CLIENT_SECRET=<client-secret> \
+  -e BC_TENANT_ID=<entra-tenant-id> \
+  -e MCP_ENCRYPTION_KEY=<64-hex-chars> \
+  -e MCP_PUBLIC_URL=https://your-domain.com \
+  origo-bc-mcp
+```
+
+**Run with a local settings file (dev / Basic auth):**
+
+```bash
+docker run -d \
+  --name origo-bc-mcp \
+  -p 3000:3000 \
+  -v /path/to/local.settings.json:/app/config/local.settings.json:ro \
+  -e MCP_DEBUG=1 \
+  origo-bc-mcp
+```
+
+**Environment variables reference:**
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `BC_CLIENT_ID` | Production | Entra app registration client ID |
+| `BC_CLIENT_SECRET` | Production | Entra app registration client secret |
+| `BC_TENANT_ID` | Production | Entra tenant ID |
+| `MCP_ENCRYPTION_KEY` | Yes | 64 hex characters (32 bytes) for AES-256-GCM — must match the legacy server for `x-origo-token` |
+| `MCP_PUBLIC_URL` | Recommended | Public URL for the server (default: `http://localhost:3000`) |
+| `PORT` | No | Listen port (default: `3000`) |
+| `MCP_DEBUG` | No | Set to `1` to enable debug logging |
+| `MCP_ALLOWED_TENANTS` | No | Comma-separated tenant IDs to allow (empty = allow all) |
+| `BC_ENVIRONMENT` | No | Default BC environment (default: `production`) |
+
+**Dashboard:**
+
+The server includes a web dashboard at `/dashboard` with real-time log streaming, active session tracking, and server stats. In Docker, PM2 provides automatic restarts — the dashboard restart/stop buttons use the PM2 API.
+
+**Docker Compose example:**
+
+```yaml
+services:
+  mcp:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - BC_CLIENT_ID=${BC_CLIENT_ID}
+      - BC_CLIENT_SECRET=${BC_CLIENT_SECRET}
+      - BC_TENANT_ID=${BC_TENANT_ID}
+      - MCP_ENCRYPTION_KEY=${MCP_ENCRYPTION_KEY}
+      - MCP_PUBLIC_URL=https://your-domain.com
+    restart: unless-stopped
+```
+
+**Health check:**
+
+```bash
+curl http://localhost:3000/healthz
+# {"status":"ok","service":"origo-bc-mcp","env":"production"}
+```
+
+### Install from tarball
+
 The server is published to the Azure Artifacts feed `BC-PTE-CloudEvents` for
 local dev/test on Windows and macOS. If you download the package artifact as a
 tarball, use the cross-platform setup guide:
