@@ -319,44 +319,63 @@ into `src/tools/`, then deploy to dev via Azure DevOps.
 
 The included `Dockerfile` builds a production image with PM2 for automatic restarts.
 
-**Build the image:**
+#### Step 1: Create a configuration file
+
+Before running the Docker container, you need a `local.settings.json` with your BC connection details. Two options:
+
+**Option A — Run the setup wizard (recommended for first-time setup):**
+
+```bash
+npm install -g github:businesscentralal/origo-bc-mcp
+origo-bc-mcp-server setup
+```
+
+This creates `~/.origo-bc-mcp/local.settings.json` (or `%USERPROFILE%\.origo-bc-mcp\local.settings.json` on Windows) with your connections configured and validated. You can uninstall the npm package afterward — the config file is all the container needs.
+
+**Option B — Create the file manually:**
+
+Copy from the [example config](config/local.settings.example.json) and fill in your connection details.
+
+#### Step 2: Build the image
 
 ```bash
 docker build -t origo-bc-mcp https://github.com/businesscentralal/origo-bc-mcp.git
 ```
 
-Or if you have the repo cloned locally:
-
-```bash
-cd origo-bc-mcp
-docker build -t origo-bc-mcp .
-```
-
-**Run with environment variables (production / OAuth):**
+#### Step 3: Run the container
 
 ```powershell
-# Windows (cmd or PowerShell)
-docker run -d --name origo-bc-mcp -p 3000:3000 -e NODE_ENV=production -e BC_CLIENT_ID=<app-client-id> -e BC_CLIENT_SECRET=<client-secret> -e BC_TENANT_ID=<entra-tenant-id> -e MCP_ENCRYPTION_KEY=<64-hex-chars> -e MCP_PUBLIC_URL=https://your-domain.com origo-bc-mcp
-```
-
-```bash
-# macOS / Linux
-docker run -d --name origo-bc-mcp -p 3000:3000 -e NODE_ENV=production -e BC_CLIENT_ID=<app-client-id> -e BC_CLIENT_SECRET=<client-secret> -e BC_TENANT_ID=<entra-tenant-id> -e MCP_ENCRYPTION_KEY=<64-hex-chars> -e MCP_PUBLIC_URL=https://your-domain.com origo-bc-mcp
-```
-
-**Run with a local settings file (dev / Basic auth):**
-
-```powershell
-# Windows
 docker run -d --name origo-bc-mcp -p 3000:3000 -v C:\Users\%USERNAME%\.origo-bc-mcp\local.settings.json:/app/config/local.settings.json:ro -e MCP_DEBUG=1 origo-bc-mcp
 ```
 
 ```bash
-# macOS / Linux
 docker run -d --name origo-bc-mcp -p 3000:3000 -v ~/.origo-bc-mcp/local.settings.json:/app/config/local.settings.json:ro -e MCP_DEBUG=1 origo-bc-mcp
 ```
 
-**Environment variables reference:**
+#### Step 4: Verify
+
+Open the dashboard in your browser: **http://localhost:3000/dashboard**
+
+Or check health from the command line:
+
+```bash
+curl http://localhost:3000/healthz
+docker logs origo-bc-mcp
+```
+
+#### Running with environment variables (production / OAuth)
+
+For production deployments without a config file, pass credentials as environment variables:
+
+```powershell
+docker run -d --name origo-bc-mcp -p 3000:3000 -e NODE_ENV=production -e BC_CLIENT_ID=<app-client-id> -e BC_CLIENT_SECRET=<client-secret> -e BC_TENANT_ID=<entra-tenant-id> -e MCP_ENCRYPTION_KEY=<64-hex-chars> -e MCP_PUBLIC_URL=https://your-domain.com origo-bc-mcp
+```
+
+```bash
+docker run -d --name origo-bc-mcp -p 3000:3000 -e NODE_ENV=production -e BC_CLIENT_ID=<app-client-id> -e BC_CLIENT_SECRET=<client-secret> -e BC_TENANT_ID=<entra-tenant-id> -e MCP_ENCRYPTION_KEY=<64-hex-chars> -e MCP_PUBLIC_URL=https://your-domain.com origo-bc-mcp
+```
+
+#### Environment variables reference
 
 | Variable | Required | Description |
 |----------|----------|-------------|
