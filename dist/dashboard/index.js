@@ -9,12 +9,15 @@
  */
 import { Router } from "express";
 import { subscribe, getBuffer, subscriberCount } from "./logBuffer.js";
+import { setupRouter } from "./setup.js";
 // Session tracking — populated by index.ts via setSessionTracker
 let sessionTracker;
 export function setSessionTracker(fn) {
     sessionTracker = fn;
 }
 const router = Router();
+// ---- Setup sub-router ---------------------------------------------------
+router.use("/setup", setupRouter);
 // ---- HTML page ----------------------------------------------------------
 router.get("/", (_req, res) => {
     res.type("html").send(PAGE_HTML);
@@ -155,6 +158,7 @@ const PAGE_HTML = `<!DOCTYPE html>
 <header>
   <h1><span>●</span> Origo MCP <span>Dashboard</span></h1>
   <div class="actions">
+    <a href="/dashboard/setup" style="padding:6px 14px;border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;text-decoration:none">⚙ Setup</a>
     <button class="restart" onclick="api('restart')">⟳ Restart</button>
     <button class="stop" onclick="api('stop')">■ Stop</button>
   </div>
