@@ -5,18 +5,15 @@ let loaded;
 export function getLocalSettings() {
     if (loaded)
         return loaded;
-    // Never honor local settings in production.
-    if ((process.env.NODE_ENV ?? "development") === "production") {
-        loaded = {};
-        return loaded;
-    }
     const path = process.env.MCP_LOCAL_SETTINGS_PATH
         ? resolve(process.env.MCP_LOCAL_SETTINGS_PATH)
-        : resolve(process.cwd(), "config", "local.settings.json");
+        : process.env.MCP_DATA_DIR
+            ? resolve(process.env.MCP_DATA_DIR, "local.settings.json")
+            : resolve(process.cwd(), "config", "local.settings.json");
     try {
         const raw = readFileSync(path, "utf8");
         loaded = JSON.parse(raw);
-        // Resolve secret fields (env:, dpapi:, keychain:, plain:) in devConnection.
+        // Resolve secret fields (env:, dpapi:, keychain:, aes:, plain:) in devConnection.
         if (loaded.devConnection) {
             const dc = loaded.devConnection;
             dc.clientSecret = resolveSecret(dc.clientSecret);
@@ -27,12 +24,20 @@ export function getLocalSettings() {
             loaded.basicAuth.password = resolveSecret(loaded.basicAuth.password) ?? loaded.basicAuth.password;
         }
         if (loaded.basicAuth?.enabled) {
-            console.warn(`[local-settings] Basic auth ENABLED from ${path} — dev only. ` +
-                "This will not work when NODE_ENV=production.");
+            console.warn(`[local-settings] Basic auth ENABLED from ${path}`);
         }
     }
     catch {
         loaded = {};
+    }
+    // Bootstrap basic auth from env vars when not configured in file
+    if (!loaded.basicAuth?.enabled && process.env.MCP_ADMIN_USER && process.env.MCP_ADMIN_PASSWORD) {
+        loaded.basicAuth = {
+            enabled: true,
+            username: process.env.MCP_ADMIN_USER,
+            password: process.env.MCP_ADMIN_PASSWORD,
+        };
+        console.warn("[local-settings] Basic auth bootstrapped from MCP_ADMIN_USER/MCP_ADMIN_PASSWORD env vars.");
     }
     return loaded;
 }
@@ -67,10 +72,8 @@ export function listConnectionNames() {
         names.push(...Object.keys(ls.connections));
     return names;
 }
-/** True only when Basic auth is enabled via local settings AND not in production. */
+/** True only when Basic auth is enabled via local settings. */
 export function isBasicAuthEnabled() {
-    if ((process.env.NODE_ENV ?? "development") === "production")
-        return false;
     const ls = getLocalSettings();
     return Boolean(ls.basicAuth?.enabled && ls.basicAuth.username && ls.basicAuth.password);
 }

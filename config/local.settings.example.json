@@ -1,5 +1,5 @@
  {
-  "_comment": "Copy to config/local.settings.json (gitignored). DEV ONLY — ignored when NODE_ENV=production. Run 'origo-bc-mcp-server setup' for guided configuration.",
+  "_comment": "Copy to config/local.settings.json (gitignored). Run 'origo-bc-mcp-server setup' for guided configuration, or use the dashboard at /dashboard/setup.",
 
   "basicAuth": {
     "enabled": true,
@@ -12,7 +12,7 @@
     "baseUrl": "https://<host>:443/<instance>rest",
     "onPremTenant": "default",
     "user": "<bc-web-service-user>",
-    "key": "<bc-web-service-access-key | env:VAR_NAME | dpapi:base64>",
+    "key": "<bc-web-service-access-key | env:VAR_NAME | dpapi:base64 | aes:base64>",
     "companyId": "<company-guid>",
     "companyName": "OnPrem",
     "environment": "onprem"
@@ -21,8 +21,8 @@
   "_devConnection_saas_example": {
     "tenantId": "<entra-tenant-guid>",
     "clientId": "<app-client-id>",
-    "clientSecret": "<client-secret | env:VAR_NAME | dpapi:base64 | keychain:service>",
-    "refreshToken": "<refresh-token | env:VAR_NAME | dpapi:base64 | keychain:service>",
+    "clientSecret": "<client-secret | env:VAR_NAME | dpapi:base64 | aes:base64 | keychain:service>",
+    "refreshToken": "<refresh-token | env:VAR_NAME | dpapi:base64 | aes:base64 | keychain:service>",
     "environment": "UAT",
     "companyId": "<company-guid>"
   },

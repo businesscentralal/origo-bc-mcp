@@ -12,11 +12,15 @@ import { Router } from "express";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { validateConnection } from "../cli/validate.js";
+import { encryptSecret, canEncryptSecrets } from "../config/resolveSecret.js";
 const router = Router();
 // ── Config file path resolution ──────────────────────────────────────────────
 function getConfigPath() {
     if (process.env.MCP_LOCAL_SETTINGS_PATH) {
         return resolve(process.env.MCP_LOCAL_SETTINGS_PATH);
+    }
+    if (process.env.MCP_DATA_DIR) {
+        return resolve(process.env.MCP_DATA_DIR, "local.settings.json");
     }
     return resolve(process.cwd(), "config", "local.settings.json");
 }
@@ -35,6 +39,31 @@ function writeConfig(config) {
     if (!existsSync(dir))
         mkdirSync(dir, { recursive: true });
     writeFileSync(path, JSON.stringify(config, null, 2) + "\n", "utf8");
+}
+/**
+ * Encrypts secret fields in a connection object before writing to disk.
+ * Uses AES-256-GCM via MCP_ENCRYPTION_KEY. Falls back to plain: prefix on Linux
+ * when no key is set. On Windows, leaves values as-is (DPAPI used by CLI setup).
+ */
+function encryptConnectionSecrets(conn) {
+    const secretFields = ["clientSecret", "refreshToken", "key"];
+    for (const field of secretFields) {
+        const value = conn[field];
+        if (!value)
+            continue;
+        // Don't re-encrypt already-prefixed values
+        if (value.startsWith("aes:") || value.startsWith("dpapi:") || value.startsWith("env:") || value.startsWith("keychain:") || value.startsWith("plain:")) {
+            continue;
+        }
+        const encrypted = encryptSecret(value);
+        if (encrypted) {
+            conn[field] = encrypted;
+        }
+        else if (process.platform !== "win32") {
+            // On non-Windows without encryption key, mark as plain (explicit)
+            conn[field] = `plain:${value}`;
+        }
+    }
 }
 // ── API Routes ───────────────────────────────────────────────────────────────
 router.get("/api/connections", (_req, res) => {
@@ -64,6 +93,10 @@ router.get("/api/connections", (_req, res) => {
         basicAuth: config.basicAuth ? { enabled: config.basicAuth.enabled, username: config.basicAuth.username } : null,
         setupConnection: config.setupConnection,
         connections,
+        encryption: {
+            available: canEncryptSecrets(),
+            method: canEncryptSecrets() ? "aes-256-gcm" : (process.platform === "win32" ? "dpapi" : "none"),
+        },
     });
 });
 router.post("/api/connections", (req, res) => {
@@ -73,17 +106,20 @@ router.post("/api/connections", (req, res) => {
         config.basicAuth = basicAuth;
     }
     if (connection && name) {
+        // Encrypt secret fields at rest when MCP_ENCRYPTION_KEY is available
+        const connToSave = { ...connection };
+        encryptConnectionSecrets(connToSave);
         if (name === "default") {
-            config.devConnection = connection;
+            config.devConnection = connToSave;
         }
         else {
             if (!config.connections)
                 config.connections = {};
-            config.connections[name] = connection;
+            config.connections[name] = connToSave;
         }
     }
     writeConfig(config);
-    res.json({ ok: true, configPath: getConfigPath() });
+    res.json({ ok: true, configPath: getConfigPath(), encrypted: canEncryptSecrets() });
 });
 router.post("/api/connections/validate", async (req, res) => {
     const { connection, connectionName } = req.body;

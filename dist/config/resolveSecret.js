@@ -1,4 +1,5 @@
 import { spawnSync } from "node:child_process";
+import { createCipheriv, createDecipheriv, randomBytes } from "node:crypto";
 /**
  * Resolves a secret value from its stored form.
  *
@@ -24,6 +25,9 @@ export function resolveSecret(value) {
     }
     if (v.startsWith("keychain:")) {
         return readKeychain(v.slice("keychain:".length));
+    }
+    if (v.startsWith("aes:")) {
+        return decryptAes(v.slice("aes:".length));
     }
     if (v.startsWith("plain:")) {
         return v.slice("plain:".length);
@@ -84,5 +88,51 @@ function readKeychain(service) {
         throw new Error(`Keychain returned empty value for service "${service}".`);
     }
     return value;
+}
+// ── AES-256-GCM (cross-platform, uses MCP_ENCRYPTION_KEY) ────────────────────
+function getEncryptionKeyBuffer() {
+    const hex = process.env.MCP_ENCRYPTION_KEY;
+    if (!hex || hex.length !== 64) {
+        throw new Error("aes: secrets require MCP_ENCRYPTION_KEY environment variable (64 hex chars = 32 bytes).");
+    }
+    return Buffer.from(hex, "hex");
+}
+function decryptAes(b64) {
+    const key = getEncryptionKeyBuffer();
+    const data = Buffer.from(b64, "base64");
+    if (data.length < 28) {
+        throw new Error("aes: ciphertext too short (expected IV + authTag + ciphertext).");
+    }
+    const iv = data.subarray(0, 12);
+    const authTag = data.subarray(12, 28);
+    const ciphertext = data.subarray(28);
+    const decipher = createDecipheriv("aes-256-gcm", key, iv);
+    decipher.setAuthTag(authTag);
+    const decrypted = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    return decrypted.toString("utf8");
+}
+/**
+ * Encrypts a plaintext value with AES-256-GCM using MCP_ENCRYPTION_KEY.
+ * Returns a string in the format "aes:<base64(IV + authTag + ciphertext)>".
+ * Returns undefined if MCP_ENCRYPTION_KEY is not set (caller should fall back to plain:).
+ */
+export function encryptSecret(plaintext) {
+    const hex = process.env.MCP_ENCRYPTION_KEY;
+    if (!hex || hex.length !== 64)
+        return undefined;
+    const key = Buffer.from(hex, "hex");
+    const iv = randomBytes(12);
+    const cipher = createCipheriv("aes-256-gcm", key, iv);
+    const encrypted = Buffer.concat([cipher.update(plaintext, "utf8"), cipher.final()]);
+    const tag = cipher.getAuthTag();
+    const packed = Buffer.concat([iv, tag, encrypted]).toString("base64");
+    return `aes:${packed}`;
+}
+/**
+ * Returns true if secrets can be encrypted at rest (MCP_ENCRYPTION_KEY is available).
+ */
+export function canEncryptSecrets() {
+    const hex = process.env.MCP_ENCRYPTION_KEY;
+    return Boolean(hex && hex.length === 64);
 }
 //# sourceMappingURL=resolveSecret.js.map

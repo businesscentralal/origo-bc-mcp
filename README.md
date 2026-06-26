@@ -95,10 +95,24 @@ Expected output:
 ```
 origo-bc-mcp listening on :3000 (development)
   MCP endpoint:    http://localhost:3000/mcp
+  Dashboard:       http://localhost:3000/dashboard
   Health:          http://localhost:3000/healthz
 ```
 
-Custom port:
+## Dashboard
+
+The server includes a web dashboard at `/dashboard`:
+
+- **Real-time logs** — SSE stream with filtering, auto-scroll, clear
+- **Active sessions** — connected MCP clients
+- **Server stats** — uptime, memory, PID, Node version
+- **Debug toggle** — enable/disable `MCP_DEBUG` at runtime without restart
+- **Setup UI** (`/dashboard/setup`) — manage connections, Basic Auth credentials, validate endpoints
+- **Restart / Stop** — PM2-aware controls (in Docker containers)
+
+The dashboard is protected by Basic Auth credentials. On first start with no config, it's open to allow initial setup.
+
+## Custom port
 
 ```bash
 PORT=3001 origo-bc-mcp-server          # macOS/Linux
@@ -262,29 +276,31 @@ curl localhost:3000/healthz
 curl localhost:3000/.well-known/oauth-protected-resource
 ```
 
-### Local Basic auth (dev only)
+### Basic auth
 
-> Full walkthrough: **`docs/local-dev.md`**.
+Basic auth secures MCP endpoints and the dashboard. It works in all environments
+(local dev, Docker, production). Configure it in one of three ways:
 
-For local testing without Entra/OAuth you can enable HTTP Basic auth backed by a
-local BC connection. It is **disabled whenever `NODE_ENV=production`** and is
-configured via a gitignored file:
+1. **Dashboard Setup UI** — open `/dashboard/setup`, fill in credentials (recommended for Docker)
+2. **Environment variables** — set `MCP_ADMIN_USER` + `MCP_ADMIN_PASSWORD` at startup
+3. **Config file** — set `basicAuth` in `local.settings.json`:
 
 ```bash
 cp config/local.settings.example.json config/local.settings.json
-# edit: basicAuth.username/password + devConnection (tenantId, clientId,
-#       clientSecret OR refreshToken, environment, companyId)
+# edit: basicAuth.username/password + devConnection
 npm run dev
 ```
 
 Then call the server with Basic credentials:
 
 ```bash
-curl -u dev:yourpass -X POST localhost:3000/mcp \
+curl -u admin:yourpass -X POST localhost:3000/mcp \
   -H 'content-type: application/json' \
   -H 'accept: application/json, text/event-stream' \
   -d '{"jsonrpc":"2.0","method":"initialize","id":1,"params":{"protocolVersion":"2024-11-05","capabilities":{},"clientInfo":{"name":"curl","version":"1"}}}'
 ```
+
+The same credentials protect the web dashboard at `/dashboard`.
 
 The Basic-auth connection is locked to its configured tenant (it cannot cross
 tenants), exactly like `x-origo-token`.
@@ -317,105 +333,89 @@ into `src/tools/`, then deploy to dev via Azure DevOps.
 
 ### Run with Docker
 
-The included `Dockerfile` builds a production image with PM2 for automatic restarts.
+The included `Dockerfile` builds a production image with PM2 for automatic restarts. Configuration is stored in a `/data` volume inside the container and managed through the web dashboard.
 
-#### Step 1: Create a configuration file
-
-Before running the Docker container, you need a `local.settings.json` with your BC connection details. Two options:
-
-**Option A — Run the setup wizard (recommended for first-time setup):**
-
-```bash
-npm install -g github:businesscentralal/origo-bc-mcp
-origo-bc-mcp-server setup
-```
-
-This creates `~/.origo-bc-mcp/local.settings.json` (or `%USERPROFILE%\.origo-bc-mcp\local.settings.json` on Windows) with your connections configured and validated. You can uninstall the npm package afterward — the config file is all the container needs.
-
-**Option B — Create the file manually:**
-
-Copy from the [example config](config/local.settings.example.json) and fill in your connection details.
-
-#### Step 2: Build the image
+#### Step 1: Build the image
 
 ```bash
 docker build -t origo-bc-mcp https://github.com/businesscentralal/origo-bc-mcp.git
 ```
 
-#### Step 3: Run the container
+#### Step 2: Run the container
+
+Mount a local folder for persistent config storage:
 
 ```powershell
-docker run -d --name origo-bc-mcp -p 3000:3000 -v C:\Users\%USERNAME%\.origo-bc-mcp\local.settings.json:/app/config/local.settings.json:ro -e MCP_DEBUG=1 origo-bc-mcp
+docker run -d --name origo-bc-mcp -p 3000:3000 -v E:\Docker Storage\origo-bc-mcp:/data -e MCP_ENCRYPTION_KEY=<64-hex-chars> -e MCP_ADMIN_USER=admin -e MCP_ADMIN_PASSWORD=<your-password> origo-bc-mcp
 ```
 
 ```bash
-docker run -d --name origo-bc-mcp -p 3000:3000 -v ~/.origo-bc-mcp/local.settings.json:/app/config/local.settings.json:ro -e MCP_DEBUG=1 origo-bc-mcp
+docker run -d --name origo-bc-mcp -p 3000:3000 -v /path/to/origo-bc-mcp-data:/data -e MCP_ENCRYPTION_KEY=<64-hex-chars> -e MCP_ADMIN_USER=admin -e MCP_ADMIN_PASSWORD=<your-password> origo-bc-mcp
 ```
 
-#### Step 4: Verify
+> **`MCP_ENCRYPTION_KEY`** encrypts connection secrets (passwords, client secrets) at rest in the volume. Generate one with: `openssl rand -hex 32`
+>
+> **`MCP_ADMIN_USER` / `MCP_ADMIN_PASSWORD`** secure the dashboard on first boot. Without these, the dashboard is open until you configure Basic Auth in the setup UI.
 
-Open the dashboard in your browser: **http://localhost:3000/dashboard**
+#### Step 3: Configure via the dashboard
 
-Or check health from the command line:
+Open **http://localhost:3000/dashboard/setup** in your browser.
 
-```bash
-curl http://localhost:3000/healthz
-docker logs origo-bc-mcp
+On first launch (no config exists), the dashboard is open. Add your first connection and enable Basic Auth — subsequent visits will require login.
+
+The setup page lets you:
+- Add SaaS (Entra) or On-Premises BC connections
+- Validate connections (test button confirms access and lists companies)
+- Configure Basic Auth credentials (used for both MCP access and dashboard login)
+- Remove connections
+
+#### Step 4: Connect your MCP client
+
+Point your MCP client (VS Code Copilot, Claude Desktop, Open WebUI, etc.) at:
+
+```
+http://localhost:3000/mcp
 ```
 
-#### Running with environment variables (production / OAuth)
+With Basic Auth header using the credentials you configured in the dashboard.
 
-For production deployments without a config file, pass credentials as environment variables:
+#### Dashboard login
 
-```powershell
-docker run -d --name origo-bc-mcp -p 3000:3000 -e NODE_ENV=production -e BC_CLIENT_ID=<app-client-id> -e BC_CLIENT_SECRET=<client-secret> -e BC_TENANT_ID=<entra-tenant-id> -e MCP_ENCRYPTION_KEY=<64-hex-chars> -e MCP_PUBLIC_URL=https://your-domain.com origo-bc-mcp
-```
+The dashboard is protected by the same Basic Auth credentials configured in Setup. If you haven't configured Basic Auth yet, the dashboard is open (to allow first-time setup).
 
-```bash
-docker run -d --name origo-bc-mcp -p 3000:3000 -e NODE_ENV=production -e BC_CLIENT_ID=<app-client-id> -e BC_CLIENT_SECRET=<client-secret> -e BC_TENANT_ID=<entra-tenant-id> -e MCP_ENCRYPTION_KEY=<64-hex-chars> -e MCP_PUBLIC_URL=https://your-domain.com origo-bc-mcp
-```
+#### Environment variables
 
-#### Environment variables reference
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `MCP_DATA_DIR` | `/data` | Directory for `local.settings.json` (mounted volume) |
+| `MCP_ADMIN_USER` | — | Bootstrap admin username (sets Basic Auth on first start if no config exists) |
+| `MCP_ADMIN_PASSWORD` | — | Bootstrap admin password (pair with `MCP_ADMIN_USER`) |
+| `MCP_ENCRYPTION_KEY` | — | 64 hex characters for AES-256-GCM encryption of secrets at rest |
+| `MCP_PUBLIC_URL` | `http://localhost:3000` | Public URL for the server |
+| `PORT` | `3000` | Listen port |
+| `MCP_DEBUG` | — | Set to `1` to enable debug logging (also toggleable from dashboard) |
 
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `BC_CLIENT_ID` | Production | Entra app registration client ID |
-| `BC_CLIENT_SECRET` | Production | Entra app registration client secret |
-| `BC_TENANT_ID` | Production | Entra tenant ID |
-| `MCP_ENCRYPTION_KEY` | Yes | 64 hex characters (32 bytes) for AES-256-GCM — must match the legacy server for `x-origo-token` |
-| `MCP_PUBLIC_URL` | Recommended | Public URL for the server (default: `http://localhost:3000`) |
-| `PORT` | No | Listen port (default: `3000`) |
-| `MCP_DEBUG` | No | Set to `1` to enable debug logging |
-| `MCP_ALLOWED_TENANTS` | No | Comma-separated tenant IDs to allow (empty = allow all) |
-| `BC_ENVIRONMENT` | No | Default BC environment (default: `production`) |
-
-**Dashboard:**
-
-The server includes a web dashboard at `/dashboard` with real-time log streaming, active session tracking, and server stats. In Docker, PM2 provides automatic restarts — the dashboard restart/stop buttons use the PM2 API.
-
-**Docker Compose example:**
+#### Docker Compose example
 
 ```yaml
 services:
   mcp:
-    build: .
+    build: https://github.com/businesscentralal/origo-bc-mcp.git
     ports:
       - "3000:3000"
+    volumes:
+      - ./mcp-data:/data
     environment:
-      - NODE_ENV=production
-      - BC_CLIENT_ID=${BC_CLIENT_ID}
-      - BC_CLIENT_SECRET=${BC_CLIENT_SECRET}
-      - BC_TENANT_ID=${BC_TENANT_ID}
       - MCP_ENCRYPTION_KEY=${MCP_ENCRYPTION_KEY}
-      - MCP_PUBLIC_URL=https://your-domain.com
+      - MCP_ADMIN_USER=${MCP_ADMIN_USER:-admin}
+      - MCP_ADMIN_PASSWORD=${MCP_ADMIN_PASSWORD}
     restart: unless-stopped
 ```
 
-**Health check:**
+#### Health check
 
 ```bash
 curl http://localhost:3000/healthz
-# {"status":"ok","service":"origo-bc-mcp","env":"production"}
 ```
 
 ### Install from tarball

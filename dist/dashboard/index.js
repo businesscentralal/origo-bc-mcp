@@ -8,14 +8,22 @@
  *   • Restart / stop via PM2 programmatic API (when available)
  */
 import { Router } from "express";
+import express from "express";
 import { subscribe, getBuffer, subscriberCount } from "./logBuffer.js";
 import { setupRouter } from "./setup.js";
+import { dashboardAuth, handleLogin, handleLogout } from "./auth.js";
 // Session tracking — populated by index.ts via setSessionTracker
 let sessionTracker;
 export function setSessionTracker(fn) {
     sessionTracker = fn;
 }
 const router = Router();
+// ---- Auth endpoints (before middleware) ----------------------------------
+router.use(express.urlencoded({ extended: false }));
+router.post("/login", handleLogin);
+router.post("/logout", handleLogout);
+// ---- Auth middleware — protects all routes below -------------------------
+router.use(dashboardAuth);
 // ---- Setup sub-router ---------------------------------------------------
 router.use("/setup", setupRouter);
 // ---- HTML page ----------------------------------------------------------
@@ -48,7 +56,19 @@ router.get("/api/status", (_req, res) => {
         subscribers: subscriberCount(),
         nodeVersion: process.version,
         pid: process.pid,
+        debug: process.env.MCP_DEBUG === "1",
     });
+});
+router.post("/api/debug", (req, res) => {
+    const { enabled } = req.body;
+    if (enabled) {
+        process.env.MCP_DEBUG = "1";
+    }
+    else {
+        delete process.env.MCP_DEBUG;
+    }
+    console.log(`[dashboard] Debug mode ${enabled ? "ENABLED" : "DISABLED"}`);
+    res.json({ ok: true, debug: process.env.MCP_DEBUG === "1" });
 });
 router.post("/api/restart", async (_req, res) => {
     try {
@@ -158,6 +178,9 @@ const PAGE_HTML = `<!DOCTYPE html>
 <header>
   <h1><span>●</span> Origo MCP <span>Dashboard</span></h1>
   <div class="actions">
+    <label style="display:flex;align-items:center;gap:4px;font-size:13px;cursor:pointer" title="Toggle debug logging">
+      <input type="checkbox" id="debug-toggle" onchange="toggleDebug(this.checked)"> Debug
+    </label>
     <a href="/dashboard/setup" style="padding:6px 14px;border:1px solid var(--border);border-radius:6px;color:var(--text);font-size:13px;text-decoration:none">⚙ Setup</a>
     <button class="restart" onclick="api('restart')">⟳ Restart</button>
     <button class="stop" onclick="api('stop')">■ Stop</button>
@@ -261,6 +284,7 @@ async function pollStatus() {
     document.getElementById('s-sessions').textContent = d.sessions.length;
     document.getElementById('s-pid').textContent = d.pid;
     document.getElementById('s-node').textContent = d.nodeVersion;
+    document.getElementById('debug-toggle').checked = d.debug;
 
     const sessEl = document.getElementById('sessions');
     if (d.sessions.length === 0) {
@@ -283,6 +307,16 @@ async function api(action) {
     const d = await r.json();
     if (d.note) alert(d.note);
   } catch(e) { alert('Action failed: ' + e.message); }
+}
+
+async function toggleDebug(enabled) {
+  try {
+    await fetch('/dashboard/api/debug', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ enabled }),
+    });
+  } catch(e) { alert('Failed to toggle debug: ' + e.message); }
 }
 </script>
 </body>
