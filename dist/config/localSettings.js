@@ -2,6 +2,11 @@ import { readFileSync } from "node:fs";
 import { resolve } from "node:path";
 import { resolveSecret } from "./resolveSecret.js";
 let loaded;
+/** Invalidate the cached settings so the next call to getLocalSettings() reloads from disk. */
+export function invalidateSettingsCache() {
+    loaded = undefined;
+    resolvedConnections.clear();
+}
 export function getLocalSettings() {
     if (loaded)
         return loaded;

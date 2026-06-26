@@ -13,6 +13,7 @@ import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { validateConnection } from "../cli/validate.js";
 import { encryptSecret, canEncryptSecrets } from "../config/resolveSecret.js";
+import { invalidateSettingsCache } from "../config/localSettings.js";
 const TOKEN_HOST = "login.microsoftonline.com";
 const BC_SCOPE = "https://api.businesscentral.dynamics.com/.default";
 const router = Router();
@@ -41,6 +42,7 @@ function writeConfig(config) {
     if (!existsSync(dir))
         mkdirSync(dir, { recursive: true });
     writeFileSync(path, JSON.stringify(config, null, 2) + "\n", "utf8");
+    invalidateSettingsCache();
 }
 /**
  * Encrypts secret fields in a connection object before writing to disk.
