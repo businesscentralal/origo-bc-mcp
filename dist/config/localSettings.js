@@ -30,14 +30,17 @@ export function getLocalSettings() {
     catch {
         loaded = {};
     }
-    // Bootstrap basic auth from env vars when not configured in file
-    if (!loaded.basicAuth?.enabled && process.env.MCP_ADMIN_USER && process.env.MCP_ADMIN_PASSWORD) {
+    // Env vars always override file-based basic auth
+    if (process.env.MCP_ADMIN_USER && process.env.MCP_ADMIN_PASSWORD) {
         loaded.basicAuth = {
             enabled: true,
             username: process.env.MCP_ADMIN_USER,
             password: process.env.MCP_ADMIN_PASSWORD,
         };
-        console.warn("[local-settings] Basic auth bootstrapped from MCP_ADMIN_USER/MCP_ADMIN_PASSWORD env vars.");
+        console.warn("[local-settings] Basic auth ENABLED from MCP_ADMIN_USER/MCP_ADMIN_PASSWORD env vars.");
+    }
+    else if (loaded.basicAuth?.enabled) {
+        console.warn(`[local-settings] Basic auth ENABLED from config file.`);
     }
     return loaded;
 }

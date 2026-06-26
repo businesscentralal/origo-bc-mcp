@@ -89,10 +89,12 @@ router.get("/api/connections", (_req, res) => {
             });
         }
     }
+    const envControlled = Boolean(process.env.MCP_ADMIN_USER && process.env.MCP_ADMIN_PASSWORD);
     res.json({
         configPath: getConfigPath(),
         configExists: existsSync(getConfigPath()),
         basicAuth: config.basicAuth ? { enabled: config.basicAuth.enabled, username: config.basicAuth.username } : null,
+        basicAuthEnvControlled: envControlled,
         setupConnection: config.setupConnection,
         connections,
         encryption: {
@@ -422,18 +424,24 @@ const SETUP_HTML = `<!DOCTYPE html>
   <div id="form-result"></div>
 </div>
 
-<div class="basic-auth-section">
+<div class="basic-auth-section" id="ba-section">
   <h3>Basic Auth</h3>
-  <p style="font-size:12px;color:var(--dim);margin-bottom:12px">Secures MCP endpoints and the dashboard. Same credentials used for MCP client access.</p>
-  <div class="toggle-row">
-    <input type="checkbox" id="ba-enabled">
-    <label for="ba-enabled" style="font-size:13px">Enable Basic Auth</label>
+  <p style="font-size:12px;color:var(--dim);margin-bottom:12px" id="ba-desc">Secures MCP endpoints and the dashboard. Same credentials used for MCP client access.</p>
+  <div id="ba-env-notice" style="display:none;padding:10px;background:var(--bg);border:1px solid var(--border);border-radius:6px;margin-bottom:12px">
+    <span style="color:var(--green)">✓</span> <strong>Controlled by environment variables</strong> <span style="color:var(--dim)">(MCP_ADMIN_USER / MCP_ADMIN_PASSWORD)</span>
+    <div style="margin-top:6px;font-size:12px;color:var(--dim)">Username: <strong id="ba-env-user"></strong> — change via <code>docker run -e</code> flags.</div>
   </div>
-  <div class="form-grid" style="max-width:500px">
-    <div class="form-group"><label>Username</label><input type="text" id="ba-user" placeholder="dev"></div>
-    <div class="form-group"><label>Password</label><input type="password" id="ba-pass" placeholder="your-password"></div>
+  <div id="ba-form">
+    <div class="toggle-row">
+      <input type="checkbox" id="ba-enabled">
+      <label for="ba-enabled" style="font-size:13px">Enable Basic Auth</label>
+    </div>
+    <div class="form-grid" style="max-width:500px">
+      <div class="form-group"><label>Username</label><input type="text" id="ba-user" placeholder="admin"></div>
+      <div class="form-group"><label>Password</label><input type="password" id="ba-pass" placeholder="your-password"></div>
+    </div>
+    <div style="margin-top:12px"><button class="btn" onclick="saveBasicAuth()">Save Basic Auth</button></div>
   </div>
-  <div style="margin-top:12px"><button class="btn" onclick="saveBasicAuth()">Save Basic Auth</button></div>
   <div id="ba-result"></div>
 </div>
 
@@ -456,6 +464,13 @@ async function loadConnections() {
   if (d.basicAuth) {
     document.getElementById('ba-enabled').checked = d.basicAuth.enabled;
     document.getElementById('ba-user').value = d.basicAuth.username || '';
+  }
+
+  // If env-controlled, show notice and hide edit form
+  if (d.basicAuthEnvControlled) {
+    document.getElementById('ba-env-notice').style.display = '';
+    document.getElementById('ba-env-user').textContent = d.basicAuth?.username || '';
+    document.getElementById('ba-form').style.display = 'none';
   }
 
   const el = document.getElementById('connections');
