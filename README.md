@@ -395,6 +395,23 @@ The dashboard is protected by the same Basic Auth credentials configured in Setu
 | `PORT` | `3000` | Listen port |
 | `MCP_DEBUG` | — | Set to `1` to enable debug logging (also toggleable from dashboard) |
 
+#### Generating `MCP_ENCRYPTION_KEY`
+
+The key must be exactly 64 hex characters (32 bytes). Generate one with any of these:
+
+```bash
+# OpenSSL (Linux/macOS/Git Bash)
+openssl rand -hex 32
+
+# Node.js (any platform)
+node -e "console.log(require('crypto').randomBytes(32).toString('hex'))"
+
+# PowerShell (Windows)
+-join ((1..32) | ForEach-Object { '{0:x2}' -f (Get-Random -Max 256) })
+```
+
+Store the key securely — if you lose it, secrets encrypted with it cannot be recovered.
+
 #### Docker Compose example
 
 ```yaml
