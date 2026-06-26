@@ -1,3 +1,5 @@
+// Log buffer must be imported first — it intercepts console.log/error/warn.
+import "./dashboard/logBuffer.js";
 import express from "express";
 import { randomUUID } from "node:crypto";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
@@ -5,6 +7,7 @@ import { config } from "./config.js";
 import { authMiddleware } from "./auth/middleware.js";
 import { buildServer } from "./server.js";
 import { clearSession } from "./session/store.js";
+import { dashboardRouter, setSessionTracker } from "./dashboard/index.js";
 const debug = config.debug;
 function log(...args) {
     if (debug)
@@ -91,9 +94,16 @@ async function sessionRequest(req, res) {
 }
 app.get("/mcp", authMiddleware, sessionRequest);
 app.delete("/mcp", authMiddleware, sessionRequest);
+// --- Dashboard (no auth — internal use) -----------------------------------
+setSessionTracker(() => Object.entries(transports).map(([id, t]) => ({
+    id,
+    created: t._createdAt ?? Date.now(),
+})));
+app.use("/dashboard", dashboardRouter);
 app.listen(config.port, () => {
     console.log(`origo-bc-mcp listening on :${config.port} (${config.nodeEnv})`);
     console.log(`  MCP endpoint:    ${config.publicUrl}/mcp`);
+    console.log(`  Dashboard:       ${config.publicUrl}/dashboard`);
     console.log(`  Health:          ${config.publicUrl}/healthz`);
     if (debug)
         console.log(`  DEBUG MODE:      enabled (all requests/responses logged)`);
