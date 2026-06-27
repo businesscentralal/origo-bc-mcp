@@ -346,11 +346,11 @@ docker build -t origo-bc-mcp https://github.com/businesscentralal/origo-bc-mcp.g
 Mount a local folder for persistent config storage:
 
 ```powershell
-docker run -d --name origo-bc-mcp -p 3000:3000 -v "E:\Docker Storage\origo-bc-mcp:/data" -e MCP_ENCRYPTION_KEY=<64-hex-chars> -e MCP_ADMIN_USER=admin -e MCP_ADMIN_PASSWORD=<your-password> -e OLLAMA_PROXY_TARGET=http://<ollama-host>:11434 origo-bc-mcp
+docker run -d --name origo-bc-mcp --restart unless-stopped -p 3000:3000 -v "E:\Docker Storage\origo-bc-mcp:/data" -e MCP_ENCRYPTION_KEY=<64-hex-chars> -e MCP_ADMIN_USER=admin -e MCP_ADMIN_PASSWORD=<your-password> -e OLLAMA_PROXY_TARGET=http://<ollama-host>:11434 origo-bc-mcp
 ```
 
 ```bash
-docker run -d --name origo-bc-mcp -p 3000:3000 -v /path/to/origo-bc-mcp-data:/data -e MCP_ENCRYPTION_KEY=<64-hex-chars> -e MCP_ADMIN_USER=admin -e MCP_ADMIN_PASSWORD=<your-password> -e OLLAMA_PROXY_TARGET=http://<ollama-host>:11434 origo-bc-mcp
+docker run -d --name origo-bc-mcp --restart unless-stopped -p 3000:3000 -v /path/to/origo-bc-mcp-data:/data -e MCP_ENCRYPTION_KEY=<64-hex-chars> -e MCP_ADMIN_USER=admin -e MCP_ADMIN_PASSWORD=<your-password> -e OLLAMA_PROXY_TARGET=http://<ollama-host>:11434 origo-bc-mcp
 ```
 
 > **`MCP_ENCRYPTION_KEY`** encrypts connection secrets (passwords, client secrets) at rest in the volume. Generate one with: `openssl rand -hex 32`
