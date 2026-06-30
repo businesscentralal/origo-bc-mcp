@@ -177,6 +177,45 @@ export async function bcTask(tenantId, environment, companyId, envelope) {
     }
     return result;
 }
+// ── bcQueuePost — POST to BC's /queues endpoint ─────────────────────────────
+/**
+ * Posts a Cloud Event to the BC /queues endpoint for async processing.
+ * Returns the raw response (statusCode + parsed body).
+ * Use this instead of bcTask for queue_message_type — BC has no Queue.Post
+ * message type handler; the queue is a direct REST endpoint.
+ */
+export async function bcQueuePost(tenantId, environment, companyId, envelope) {
+    const ctx = getAuthContext();
+    let auth;
+    let queueUrl;
+    if (ctx.conn.onPrem) {
+        auth = onPremAuthHeader(ctx.conn);
+        const base = ctx.conn.baseUrl.replace(/\/$/, "");
+        const tenant = ctx.conn.onPremTenant ?? "default";
+        queueUrl = `${base}/api/origo/cloudevent/v1.0/companies(${companyId})/queues?tenant=${encodeURIComponent(tenant)}`;
+    }
+    else {
+        const token = await getBcAccessToken(tenantId);
+        auth = `Bearer ${token}`;
+        queueUrl = `https://${BC_HOST}/v2.0/${tenantId}/${environment}/api/origo/cloudEvent/v1.0/companies(${companyId})/queues`;
+    }
+    dbg(`POST ${queueUrl}`);
+    dbg(`  type=${envelope.type} subject=${envelope.subject || ""}`);
+    const res = await bcFetch(queueUrl, {
+        method: "POST",
+        headers: { Authorization: auth, "Content-Type": "application/json" },
+        body: JSON.stringify(envelope),
+    });
+    const text = await res.text();
+    if (!text.trim())
+        return { statusCode: res.status };
+    try {
+        return { statusCode: res.status, ...JSON.parse(text) };
+    }
+    catch {
+        return { statusCode: res.status, _raw: text };
+    }
+}
 // ── bcGet — simple GET ──────────────────────────────────────────────────────
 export async function bcGet(tenantId, path) {
     const token = await getBcAccessToken(tenantId);

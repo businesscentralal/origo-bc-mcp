@@ -2,7 +2,7 @@
  * Message type tools — list_message_types, get_message_type_help, call_message_type.
  */
 import { z } from "zod";
-import { resolveTarget, bcTask, json } from "../bc/runtime.js";
+import { resolveTarget, bcTask, bcQueuePost, json } from "../bc/runtime.js";
 const MCP_SOURCE = "Origo-BC Cloud Events MCP";
 export function registerMessageTypeTools(server) {
     server.registerTool("list_message_types", {
@@ -118,12 +118,7 @@ export function registerMessageTypeTools(server) {
         }
         if (lcid != null)
             envelope.lcid = lcid;
-        const result = await bcTask(t.tenantId, t.environment, t.companyId, {
-            specversion: "1.0",
-            type: "Queue.Post",
-            source: MCP_SOURCE,
-            data: JSON.stringify(envelope),
-        });
+        const result = await bcQueuePost(t.tenantId, t.environment, t.companyId, envelope);
         return json({ company: t.companyName, messageType: String(msgType), ...result });
     });
 }
