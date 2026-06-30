@@ -279,15 +279,26 @@ export async function bcQueueStatus(tenantId, environment, companyId, queueId) {
             catch { /* ignore */ }
             const isBinary = datacontenttype.includes("pdf") || datacontenttype.includes("octet-stream");
             const isText = datacontenttype.includes("csv") || datacontenttype.includes("plain") || datacontenttype.includes("markdown");
-            // Build data URL from location
+            // Build data URL from location — on-prem needs special handling because
+            // BC returns a broken public-alias URL; rebuild from the configured base.
             let dataUrl;
-            try {
-                const u = new URL(locationUrl);
-                const locPath = u.pathname + u.search;
-                dataUrl = `${u.protocol}//${u.host}${locPath.includes("?") ? locPath.replace("?", "/data?") : `${locPath}/data`}`;
+            const ctx2 = getAuthContext();
+            if (ctx2.conn.onPrem) {
+                const m = locationUrl.match(/\/responses\(([^)]+)\)/i);
+                const responsesId = m ? m[1] : queueId;
+                const onPremBase = ctx2.conn.baseUrl.replace(/\/$/, "");
+                const tenant = ctx2.conn.onPremTenant ?? "default";
+                dataUrl = `${onPremBase}/api/origo/cloudevent/v1.0/companies(${companyId})/responses(${responsesId})/data?tenant=${encodeURIComponent(tenant)}`;
             }
-            catch {
-                dataUrl = locationUrl.includes("?") ? locationUrl.replace("?", "/data?") : `${locationUrl}/data`;
+            else {
+                try {
+                    const u = new URL(locationUrl);
+                    const locPath = u.pathname + u.search;
+                    dataUrl = `${u.protocol}//${u.host}${locPath.includes("?") ? locPath.replace("?", "/data?") : `${locPath}/data`}`;
+                }
+                catch {
+                    dataUrl = locationUrl.includes("?") ? locationUrl.replace("?", "/data?") : `${locationUrl}/data`;
+                }
             }
             const dataRes = await bcFetch(dataUrl, { method: "GET", headers: { Authorization: auth } });
             if (isBinary) {
