@@ -216,6 +216,137 @@ export async function bcQueuePost(tenantId, environment, companyId, envelope) {
         return { statusCode: res.status, _raw: text };
     }
 }
+async function resolveQueueAuth(tenantId, environment, companyId) {
+    const ctx = getAuthContext();
+    if (ctx.conn.onPrem) {
+        const base = ctx.conn.baseUrl.replace(/\/$/, "");
+        const tenant = ctx.conn.onPremTenant ?? "default";
+        return {
+            auth: onPremAuthHeader(ctx.conn),
+            basePath: `${base}/api/origo/cloudevent/v1.0/companies(${companyId})/queues`,
+            querySuffix: `?tenant=${encodeURIComponent(tenant)}`,
+        };
+    }
+    const token = await getBcAccessToken(tenantId);
+    return {
+        auth: `Bearer ${token}`,
+        basePath: `https://${BC_HOST}/v2.0/${tenantId}/${environment}/api/origo/cloudEvent/v1.0/companies(${companyId})/queues`,
+        querySuffix: "",
+    };
+}
+function mapQueueStatus(statusCode, raw, bcResponse) {
+    if (statusCode === 201)
+        return { status: "running", message: "Queue task is still running" };
+    if (statusCode === 204)
+        return { status: "deleted", message: "Queue entry deleted or not found" };
+    if (statusCode === 200) {
+        const resp = bcResponse;
+        if (resp && resp.status === "Error") {
+            return { status: "bc_error", message: String(resp.error ?? "BC returned an error") };
+        }
+        return { status: "bc_success", message: "Queue task completed successfully" };
+    }
+    if (statusCode >= 400) {
+        if (raw.includes("status code '0'")) {
+            return { status: "deleted", message: "Queue task was cancelled or never started (BC status 0)" };
+        }
+        return { status: "error", message: `BC queue status call failed (HTTP ${statusCode})` };
+    }
+    return { status: "unknown", message: `Unexpected queue status response (HTTP ${statusCode})` };
+}
+export async function bcQueueStatus(tenantId, environment, companyId, queueId) {
+    const { auth, basePath, querySuffix } = await resolveQueueAuth(tenantId, environment, companyId);
+    const statusUrl = `${basePath}(${queueId})/Microsoft.NAV.GetStatus${querySuffix}`;
+    dbg(`POST ${statusUrl}`);
+    const res = await bcFetch(statusUrl, {
+        method: "POST",
+        headers: { Authorization: auth, "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+    });
+    const raw = await res.text();
+    let bcResponse;
+    if (res.status === 200) {
+        const locationUrl = res.headers.get("location") ?? res.headers.get("Location");
+        if (locationUrl) {
+            // Read the queue entity to get datacontenttype (the /data download reports octet-stream)
+            const entityUrl = `${basePath}(${queueId})${querySuffix}`;
+            const entityRes = await bcFetch(entityUrl, { method: "GET", headers: { Authorization: auth } });
+            const entityRaw = await entityRes.text();
+            let datacontenttype = "";
+            try {
+                datacontenttype = String(JSON.parse(entityRaw).datacontenttype ?? "").toLowerCase();
+            }
+            catch { /* ignore */ }
+            const isBinary = datacontenttype.includes("pdf") || datacontenttype.includes("octet-stream");
+            const isText = datacontenttype.includes("csv") || datacontenttype.includes("plain") || datacontenttype.includes("markdown");
+            // Build data URL from location
+            let dataUrl;
+            try {
+                const u = new URL(locationUrl);
+                const locPath = u.pathname + u.search;
+                dataUrl = `${u.protocol}//${u.host}${locPath.includes("?") ? locPath.replace("?", "/data?") : `${locPath}/data`}`;
+            }
+            catch {
+                dataUrl = locationUrl.includes("?") ? locationUrl.replace("?", "/data?") : `${locationUrl}/data`;
+            }
+            const dataRes = await bcFetch(dataUrl, { method: "GET", headers: { Authorization: auth } });
+            if (isBinary) {
+                const buf = Buffer.from(await dataRes.arrayBuffer());
+                bcResponse = { datacontenttype: datacontenttype || "application/octet-stream", dataBase64: buf.toString("base64") };
+            }
+            else if (isText) {
+                bcResponse = await dataRes.text();
+            }
+            else {
+                const dataRaw = await dataRes.text();
+                try {
+                    bcResponse = JSON.parse(dataRaw);
+                }
+                catch {
+                    bcResponse = dataRaw;
+                }
+            }
+        }
+    }
+    const mapped = mapQueueStatus(res.status, raw, bcResponse);
+    return {
+        statusCode: res.status,
+        ...mapped,
+        ...(bcResponse !== undefined ? { bcResponse } : {}),
+    };
+}
+export async function bcQueueRetry(tenantId, environment, companyId, queueId) {
+    const { auth, basePath, querySuffix } = await resolveQueueAuth(tenantId, environment, companyId);
+    const retryUrl = `${basePath}(${queueId})/Microsoft.NAV.RetryTask${querySuffix}`;
+    dbg(`POST ${retryUrl}`);
+    const res = await bcFetch(retryUrl, {
+        method: "POST",
+        headers: { Authorization: auth, "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+    });
+    const raw = await res.text();
+    const status = res.status === 200 ? "retried" : res.status === 204 ? "none" : "error";
+    const message = res.status === 200 ? "Queue task retry initiated" :
+        res.status === 204 ? "No task to retry or already running" :
+            `BC queue retry failed (HTTP ${res.status})`;
+    return { statusCode: res.status, status, message, ...(raw ? { _raw: raw } : {}) };
+}
+export async function bcQueueCancel(tenantId, environment, companyId, queueId) {
+    const { auth, basePath, querySuffix } = await resolveQueueAuth(tenantId, environment, companyId);
+    const cancelUrl = `${basePath}(${queueId})/Microsoft.NAV.CancelTask${querySuffix}`;
+    dbg(`POST ${cancelUrl}`);
+    const res = await bcFetch(cancelUrl, {
+        method: "POST",
+        headers: { Authorization: auth, "Content-Type": "application/json" },
+        body: JSON.stringify({}),
+    });
+    const raw = await res.text();
+    const status = res.status === 200 ? "cancelled" : res.status === 204 ? "none" : "error";
+    const message = res.status === 200 ? "Queue task cancelled" :
+        res.status === 204 ? "No task to cancel or cancellation failed" :
+            `BC queue cancel failed (HTTP ${res.status})`;
+    return { statusCode: res.status, status, message, ...(raw ? { _raw: raw } : {}) };
+}
 // ── bcGet — simple GET ──────────────────────────────────────────────────────
 export async function bcGet(tenantId, path) {
     const token = await getBcAccessToken(tenantId);
