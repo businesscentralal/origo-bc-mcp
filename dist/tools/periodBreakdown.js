@@ -468,5 +468,189 @@ export function registerPeriodBreakdownTools(server) {
             response.warnings = warnings;
         return json(response);
     });
+    // ── compute_period_to_date ──────────────────────────────────────────────────
+    server.registerTool("compute_period_to_date", {
+        title: "Period to date",
+        description: "Computes Year-to-Date, Quarter-to-Date, Month-to-Date, and/or Week-to-Date net change " +
+            "for any BC table with FlowField balances. Each period runs from the start of the containing " +
+            "period up to the as-of date. Returns startDate and endDate for each period.",
+        inputSchema: {
+            table: z.string().describe("BC table name (e.g. 'G/L Account', 'Customer')."),
+            balanceFields: z.array(z.number().int()).describe("Field numbers to compute (e.g. [32] for Net Change (LCY))."),
+            identifierFields: z.array(z.number().int()).optional().describe("Field numbers for row identification (default [1])."),
+            dateFilterField: z.string().optional().describe("Date filter field name (default 'Date Filter')."),
+            flowFilters: z.record(z.string()).optional().describe("Additional flow filters."),
+            asOfDate: z.string().optional().describe("As-of date YYYY-MM-DD (default today)."),
+            periods: z.array(z.enum(["Y2D", "Q2D", "M2D", "W2D"])).optional().describe("Which periods to compute (default all four)."),
+            filter: z.string().optional().describe("BC filter expression."),
+            includeZeroBalances: z.boolean().optional().describe("Include rows with zero in all periods."),
+            lcid: z.number().int().optional(),
+            companyId: z.string().optional(),
+        },
+    }, async (args) => {
+        const { table, balanceFields, identifierFields = [1], dateFilterField = "Date Filter", flowFilters = {}, asOfDate, periods: periodsParam, filter, includeZeroBalances = false, lcid = 1033, companyId, } = args;
+        if (!table)
+            throw new Error("Parameter 'table' is required.");
+        if (!balanceFields.length)
+            throw new Error("Parameter 'balanceFields' is required.");
+        const dateRx = /^\d{4}-\d{2}-\d{2}$/;
+        const asOf = asOfDate && dateRx.test(String(asOfDate).trim())
+            ? String(asOfDate).trim()
+            : new Date().toISOString().slice(0, 10);
+        const requestedPeriods = periodsParam?.length ? periodsParam : ["Y2D", "Q2D", "M2D", "W2D"];
+        const isIS = lcid === 1039;
+        // Compute start dates for each x2D period
+        const periodDefs = [];
+        for (const p of requestedPeriods) {
+            const unit = p.charAt(0);
+            const startDate = snapToStart(asOf, unit);
+            const label = isIS
+                ? unit === "Y" ? "Frá áramótum" : unit === "Q" ? "Frá upphafi ársfjórðungs" : unit === "M" ? "Frá mánaðamótum" : "Frá vikubyrjun"
+                : unit === "Y" ? "Year to Date" : unit === "Q" ? "Quarter to Date" : unit === "M" ? "Month to Date" : "Week to Date";
+            periodDefs.push({ key: p, label, startDate, endDate: asOf, unit });
+        }
+        const warnings = [];
+        let baseFilter = (filter || "").trim();
+        const dateFltr = dateFilterField;
+        const esc = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+        if (new RegExp(`${esc(dateFltr)}\\s*=`, "i").test(baseFilter)) {
+            warnings.push(`${dateFltr} was stripped from your filter — it is set automatically per period.`);
+            baseFilter = baseFilter
+                .replace(new RegExp(`,?\\s*${esc(dateFltr)}\\s*=[^),]*`, "gi"), "")
+                .replace(/^\s*,\s*/, "").replace(/,\s*$/, "").trim();
+        }
+        function buildTV(dateVal) {
+            const parts = [];
+            if (baseFilter) {
+                const inner = baseFilter.match(/^WHERE\s*\(([\s\S]*)\)$/i);
+                parts.push(inner ? inner[1].trim() : baseFilter);
+            }
+            parts.push(`${dateFltr}=FILTER(${dateVal})`);
+            for (const [n, v] of Object.entries(flowFilters)) {
+                if (v)
+                    parts.push(`${n}=FILTER(${v})`);
+            }
+            return `SORTING(No.) WHERE(${parts.join(",")})`;
+        }
+        const t = await resolveTarget({ companyId });
+        const multiField = balanceFields.length > 1;
+        const primaryBalFld = balanceFields[0];
+        const fieldNums = [...new Set([...identifierFields, ...balanceFields])];
+        const fetches = periodDefs.map((pd) => fetchAllPages(t.tenantId, t.environment, t.companyId, "Data.Records.Get", { tableName: table, tableView: buildTV(`${pd.startDate}..${asOf}`), fieldNumbers: fieldNums }, { lcid }));
+        const results = await Promise.all(fetches);
+        const truncatedIdx = results.findIndex((r) => r.truncated);
+        if (truncatedIdx !== -1) {
+            const r = results[truncatedIdx];
+            throw new Error(`period_to_date aborted: dataset too large (fetched ${r.fetched} of ${r.noOfRecords} records). ` +
+                `Apply a tighter table filter to reduce result size.`);
+        }
+        // Flatten record structure
+        for (const res of results) {
+            res.records = res.records.map((r) => {
+                if (r && (r.primaryKey || r.fields))
+                    return { ...(r.primaryKey ?? {}), ...(r.fields ?? {}) };
+                return r ?? {};
+            });
+        }
+        function resolveKeys(records, fldNums) {
+            if (!records.length)
+                return {};
+            const keys = Object.keys(records[0]);
+            const map = {};
+            fldNums.forEach((fld, i) => { if (i < keys.length)
+                map[fld] = keys[i]; });
+            return map;
+        }
+        // Build maps per period
+        const periodMaps = [];
+        let keyMap = {};
+        for (let i = 0; i < results.length; i++) {
+            const recs = results[i].records;
+            if (!Object.keys(keyMap).length && recs.length)
+                keyMap = resolveKeys(recs, fieldNums);
+            const m = new Map();
+            const pkKey = recs.length ? Object.keys(recs[0])[0] : undefined;
+            for (const r of recs)
+                m.set(String(pkKey ? r[pkKey] : Object.values(r)[0]), r);
+            periodMaps.push(m);
+        }
+        const pkKey = keyMap[identifierFields[0]];
+        const balKeyOf = (fld) => keyMap[fld];
+        // Collect all PKs across all periods
+        const allPKs = new Set();
+        for (const m of periodMaps)
+            for (const k of m.keys())
+                allPKs.add(k);
+        const rows = [];
+        const summary = {};
+        for (const pd of periodDefs)
+            summary[pd.key] = multiField ? Object.fromEntries(balanceFields.map((f) => [balKeyOf(f) ?? String(f), 0])) : 0;
+        let summaryCount = 0;
+        for (const pk of allPKs) {
+            // Check if all periods are zero
+            let anyNonZero = false;
+            const row = {};
+            // Identity from the first period that has this row
+            for (const m of periodMaps) {
+                const rec = m.get(pk);
+                if (rec) {
+                    for (const fld of identifierFields) {
+                        const k = keyMap[fld];
+                        if (k && !(k in row))
+                            row[k] = rec[k] ?? "";
+                    }
+                    break;
+                }
+            }
+            for (let i = 0; i < periodDefs.length; i++) {
+                const pd = periodDefs[i];
+                const rec = periodMaps[i].get(pk);
+                if (multiField) {
+                    const pObj = {};
+                    for (const f of balanceFields) {
+                        const val = numVal(rec, balKeyOf(f));
+                        pObj[balKeyOf(f) ?? String(f)] = Math.round(val * 100) / 100;
+                        if (Math.abs(val) >= 0.005)
+                            anyNonZero = true;
+                    }
+                    row[pd.key] = pObj;
+                }
+                else {
+                    const val = numVal(rec, balKeyOf(primaryBalFld));
+                    row[pd.key] = Math.round(val * 100) / 100;
+                    if (Math.abs(val) >= 0.005)
+                        anyNonZero = true;
+                }
+            }
+            if (!includeZeroBalances && !anyNonZero)
+                continue;
+            rows.push(row);
+            summaryCount += 1;
+            for (let i = 0; i < periodDefs.length; i++) {
+                const pd = periodDefs[i];
+                if (multiField) {
+                    const rowVal = row[pd.key];
+                    const summVal = summary[pd.key];
+                    for (const f of balanceFields) {
+                        const bk = balKeyOf(f) ?? String(f);
+                        summVal[bk] = Math.round(((summVal[bk] || 0) + (rowVal[bk] || 0)) * 100) / 100;
+                    }
+                }
+                else {
+                    summary[pd.key] =
+                        Math.round(((summary[pd.key] || 0) + (row[pd.key] || 0)) * 100) / 100;
+                }
+            }
+        }
+        const response = {
+            company: t.companyName, table, asOfDate: asOf,
+            periodDefinitions: periodDefs.map(({ key, label, startDate, endDate }) => ({ key, label, startDate, endDate })),
+            rows, summary: { ...summary, count: summaryCount },
+            recordsFetched: results.reduce((s, r) => s + r.fetched, 0), parallelCalls: fetches.length,
+        };
+        if (warnings.length)
+            response.warnings = warnings;
+        return json(response);
+    });
 }
 //# sourceMappingURL=periodBreakdown.js.map
