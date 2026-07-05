@@ -24,32 +24,80 @@ function estimateDays(b) {
         return value * 7;
     return value;
 }
-function subtractOffset(dateStr, b) {
+/** Snap a date to the START of its containing whole bucket (month/quarter/year/week). */
+function snapToStart(dateStr, unit) {
     const d = new Date(`${dateStr}T00:00:00Z`);
-    const { value, unit } = b;
-    if (unit === "D")
-        d.setUTCDate(d.getUTCDate() - value);
-    else if (unit === "W")
-        d.setUTCDate(d.getUTCDate() - value * 7);
-    else if (unit === "M") {
-        const day = d.getUTCDate();
-        d.setUTCMonth(d.getUTCMonth() - value);
-        if (d.getUTCDate() !== day)
-            d.setUTCDate(0);
+    if (unit === "M") {
+        d.setUTCDate(1);
     }
     else if (unit === "Q") {
-        const day = d.getUTCDate();
+        const m = d.getUTCMonth();
+        d.setUTCMonth(m - (m % 3), 1);
+    }
+    else if (unit === "Y") {
+        d.setUTCMonth(0, 1);
+    }
+    else if (unit === "W") {
+        const dow = d.getUTCDay();
+        d.setUTCDate(d.getUTCDate() - ((dow + 6) % 7));
+    } // Monday start
+    return d.toISOString().slice(0, 10);
+}
+/** Snap a date to the END of its containing whole bucket (month/quarter/year/week). */
+function snapToEnd(dateStr, unit) {
+    const d = new Date(`${dateStr}T00:00:00Z`);
+    if (unit === "M") {
+        d.setUTCMonth(d.getUTCMonth() + 1, 0);
+    }
+    else if (unit === "Q") {
+        const m = d.getUTCMonth();
+        d.setUTCMonth(m - (m % 3) + 3, 0);
+    }
+    else if (unit === "Y") {
+        d.setUTCMonth(11, 31);
+    }
+    else if (unit === "W") {
+        const dow = d.getUTCDay();
+        d.setUTCDate(d.getUTCDate() + ((7 - dow) % 7));
+    } // Sunday end
+    return d.toISOString().slice(0, 10);
+}
+/**
+ * Subtract N whole buckets from a date, snapping to whole-bucket boundaries.
+ * For M/Q/Y/W: the asOf date is snapped to end-of-bucket, then we subtract N whole units.
+ * For D: no snapping (days are always whole).
+ */
+function subtractOffset(dateStr, b) {
+    const { value, unit } = b;
+    if (unit === "D") {
+        const d = new Date(`${dateStr}T00:00:00Z`);
+        d.setUTCDate(d.getUTCDate() - value);
+        return d.toISOString().slice(0, 10);
+    }
+    // For whole-bucket units, snap asOf to end of its bucket then subtract N units to get the cutoff end.
+    const endSnapped = snapToEnd(dateStr, unit);
+    const d = new Date(`${endSnapped}T00:00:00Z`);
+    if (unit === "W")
+        d.setUTCDate(d.getUTCDate() - value * 7);
+    else if (unit === "M") {
+        d.setUTCMonth(d.getUTCMonth() - value);
+        d.setUTCDate(0); /* last day of prev month */
+    }
+    else if (unit === "Q") {
         d.setUTCMonth(d.getUTCMonth() - value * 3);
-        if (d.getUTCDate() !== day)
-            d.setUTCDate(0);
+        d.setUTCDate(0);
     }
     else {
-        const day = d.getUTCDate();
         d.setUTCFullYear(d.getUTCFullYear() - value);
-        if (d.getUTCDate() !== day)
-            d.setUTCDate(0);
+        d.setUTCDate(0);
     }
     return d.toISOString().slice(0, 10);
+}
+/** Compute the effective asOf (snapped to end of bucket for whole-bucket units). */
+function effectiveAsOf(dateStr, unit) {
+    if (unit === "D")
+        return dateStr;
+    return snapToEnd(dateStr, unit);
 }
 function addOneDay(dateStr) {
     const d = new Date(`${dateStr}T00:00:00Z`);
@@ -137,9 +185,12 @@ export function registerPeriodBreakdownTools(server) {
         if (!uniqueBuckets.length)
             throw new Error("No valid buckets after dedup.");
         const dateRx = /^\d{4}-\d{2}-\d{2}$/;
-        const asOf = asOfDate && dateRx.test(String(asOfDate).trim())
+        const rawAsOf = asOfDate && dateRx.test(String(asOfDate).trim())
             ? String(asOfDate).trim()
             : new Date().toISOString().slice(0, 10);
+        // Snap asOf to end of whole bucket (e.g. end of month for "1M" buckets).
+        const dominantUnit = uniqueBuckets[0].unit;
+        const asOf = effectiveAsOf(rawAsOf, dominantUnit);
         const cutoffDates = uniqueBuckets.map((b) => subtractOffset(asOf, b));
         const warnings = [];
         if (isNetChange && agingMode) {
@@ -245,7 +296,7 @@ export function registerPeriodBreakdownTools(server) {
         const isIS = lcid === 1039;
         const bucketDefs = [];
         if (effectiveAgingMode) {
-            bucketDefs.push({ key: "notYetDue", label: isIS ? "Ekki gjaldfallið" : "Not Yet Due" });
+            bucketDefs.push({ key: "notYetDue", label: isIS ? "Ekki gjaldfallið" : "Not Yet Due", startDate: addOneDay(asOf), endDate: "" });
         }
         for (let i = 0; i < uniqueBuckets.length; i++) {
             const prev = i === 0 ? null : uniqueBuckets[i - 1];
@@ -258,10 +309,12 @@ export function registerPeriodBreakdownTools(server) {
                 label = `${prev.value}–${curr.value} ${unitLabel(curr.unit, curr.value, isIS)}`;
             else
                 label = `${offsetLabel(prev, isIS)}–${offsetLabel(curr, isIS)}`;
-            bucketDefs.push({ key, label });
+            const endDate = i === 0 ? asOf : cutoffDates[i - 1];
+            const startDate = addOneDay(cutoffDates[i]);
+            bucketDefs.push({ key, label, startDate, endDate });
         }
         const lastB = uniqueBuckets[uniqueBuckets.length - 1];
-        bucketDefs.push({ key: `period_${lastB.value}${lastB.unit}_plus`, label: `${offsetLabel(lastB, isIS)}+` });
+        bucketDefs.push({ key: `period_${lastB.value}${lastB.unit}_plus`, label: `${offsetLabel(lastB, isIS)}+`, startDate: "", endDate: cutoffDates[cutoffDates.length - 1] });
         const rows = [];
         const summary = {};
         for (const bd of bucketDefs)

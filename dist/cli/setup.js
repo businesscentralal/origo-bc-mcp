@@ -469,42 +469,6 @@ export async function runSetup() {
     }
     writeJson(localPath, settings);
     console.log(`\n✓ Local settings written: ${localPath}`);
-    // Step 4b: Select setup connection (for default memory, UBL templates)
-    {
-        // Build list of all SaaS connections available.
-        const saasChoices = [];
-        if (settings.devConnection && !settings.devConnection.onPrem)
-            saasChoices.push("default");
-        if (settings.connections) {
-            for (const [name, conn] of Object.entries(settings.connections)) {
-                if (!name.startsWith("_") && !conn.onPrem)
-                    saasChoices.push(name);
-            }
-        }
-        if (saasChoices.length > 0) {
-            const currentSetup = settings.setupConnection;
-            const choices = [
-                ...saasChoices.map((n) => n === currentSetup ? `${n} (current)` : n),
-                "None (skip for now)",
-            ];
-            const defaultIdx = currentSetup ? choices.findIndex((c) => c.startsWith(currentSetup)) : 0;
-            const picked = await askChoice("Which connection should be the setup environment? (default memory, UBL templates)", choices, defaultIdx >= 0 ? defaultIdx : 0);
-            if (!picked.startsWith("None")) {
-                const setupName = picked.replace(" (current)", "");
-                settings.setupConnection = setupName;
-                writeJson(localPath, settings);
-                if (setupName !== currentSetup) {
-                    console.log(`  ✓ Setup connection set to "${setupName}".`);
-                }
-            }
-            else if (currentSetup) {
-                // User chose "None" but there was a previous value — clear it.
-                delete settings.setupConnection;
-                writeJson(localPath, settings);
-                console.log("  ✓ Setup connection cleared.");
-            }
-        }
-    }
     // Step 5: Update VS Code mcp.json
     const updateMcp = await askChoice("Add/update VS Code MCP config?", ["Yes", "No"], 0);
     if (updateMcp === "Yes") {

@@ -41,27 +41,11 @@ Both calls are mandatory. This primer prevents the most common query/write mista
 |------|-------|-----------|-------|---------|
 | User (default) | list/get/set_user_memory | Private | Always | Personal skills, notes, prompts |
 | Company | list/get/set_company_memory | All company users | canUpdateCompanyMemory = true | Shared team knowledge |
-| Default | list/get_default_memory | All environments | Read-only | Centrally managed defaults |
 | Environment config | get_config / set_config | All companies in env | Always | Structured JSON config |
 
 **Default = user memory.** "Save this" / "remember" without qualifier → user tier.
 
 Use company tier for shared team knowledge when permission allows.
-
-### Default memory (setup environment)
-The Default tier reads from a central setup environment shared across all customers/tenants. It is read-only — there is no set_default_memory tool.
-
-**When to use:**
-- On first session or when a user has no skills yet → check defaults for starter content.
-- When a user asks "what default skills/prompts are available?" or similar.
-- To seed a new company: \`list_default_memory\` → pick entries → \`set_company_memory\` to copy.
-
-**Pattern — discover & adopt:**
-1. \`list_default_memory()\` → browse available defaults
-2. \`get_default_memory(tableView: "WHERE(Description=FILTER(skill:*))")\` → read full content of default skills
-3. \`set_user_memory\` / \`set_company_memory\` → copy desired entries locally
-
-Default memory entries use the same description prefixes (skill:, prompt:, note:) and the same tableView / skip / take / fetchAll parameters as user and company memory.
 
 ---
 
@@ -123,7 +107,6 @@ The tool caches the document for 5 minutes. No BC connection is required — thi
 - Pagination patterns and batch processing
 - Integration timestamp management (\`get_integration_timestamp\`, \`set_integration_timestamp\`, \`reverse_integration_timestamp\`)
 - Cloud Events Delete Log queries (message types \`Deleted.Records.Get\`, \`Deleted.RecordIds.Get\`)
-- UBL XML templates and document generation
 - Error handling and retry patterns
 - Authoring rules for new message types
 

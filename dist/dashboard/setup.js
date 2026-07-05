@@ -97,7 +97,6 @@ router.get("/api/connections", (_req, res) => {
         configExists: existsSync(getConfigPath()),
         basicAuth: config.basicAuth ? { enabled: config.basicAuth.enabled, username: config.basicAuth.username } : null,
         basicAuthEnvControlled: envControlled,
-        setupConnection: config.setupConnection,
         connections,
         encryption: {
             available: canEncryptSecrets(),

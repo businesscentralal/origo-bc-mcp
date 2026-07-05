@@ -15,7 +15,6 @@ import { registerMemoryConfigTools } from "./tools/memoryConfig.js";
 import { registerIncomingDocumentTools } from "./tools/incomingDocuments.js";
 import { registerCryptoTools } from "./tools/crypto.js";
 import { registerCloudEventsSkillTools } from "./tools/cloudEventsSkill.js";
-import { registerUblTools } from "./tools/ubl.js";
 import { registerBcEventSubscriptionTools } from "./tools/bcEventSubscriptions.js";
 import { registerSessionBootstrap } from "./tools/sessionBootstrap.js";
 /**
@@ -43,7 +42,6 @@ export function buildServer() {
     registerIncomingDocumentTools(server);
     registerCryptoTools(server);
     registerCloudEventsSkillTools(server);
-    registerUblTools(server);
     registerBcEventSubscriptionTools(server);
     registerSessionBootstrap(server);
     return server;

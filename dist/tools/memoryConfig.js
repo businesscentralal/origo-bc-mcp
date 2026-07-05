@@ -1,10 +1,8 @@
 /**
- * Memory & config tools — company/user/default memory + set_config, get_config.
+ * Memory & config tools — company/user memory + set_config, get_config.
  */
 import { z } from "zod";
 import { resolveTarget, bcTask, fetchAllPages, json } from "../bc/runtime.js";
-import { resolveSetupConn, getSetupAccessToken } from "../bc/setupConn.js";
-import { listCompanies } from "../bc/client.js";
 const MCP_SOURCE = "Origo-BC Cloud Events MCP";
 const CS_TABLE = "Cloud Event Config Store";
 const MEMORY_LIST_BATCH_SIZE = 500;
@@ -34,47 +32,6 @@ function decryptData(ciphertext) {
     decipher.setAuthTag(tag);
     return Buffer.concat([decipher.update(enc), decipher.final()]).toString("utf8");
 }
-// ── Setup connection bcTask wrapper ─────────────────────────────────────────
-async function setupBcTask(companyId, envelope) {
-    const setup = resolveSetupConn();
-    const token = await getSetupAccessToken();
-    const BC_HOST = "api.businesscentral.dynamics.com";
-    const taskUrl = `https://${BC_HOST}/v2.0/${setup.tenantId}/${setup.environment}/api/origo/cloudEvent/v1.0/companies(${companyId})/tasks`;
-    const res = await fetch(taskUrl, {
-        method: "POST",
-        headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
-        body: JSON.stringify(envelope),
-    });
-    const task = (await res.json());
-    if (task.status === "Error")
-        throw new Error(String(task.error || JSON.stringify(task)));
-    if (task.data) {
-        const dataStr = String(task.data);
-        if (dataStr.startsWith(`https://${BC_HOST}/`)) {
-            const dataRes = await fetch(dataStr, {
-                method: "GET",
-                headers: { Authorization: `Bearer ${token}` },
-            });
-            const raw = await dataRes.text();
-            try {
-                return JSON.parse(raw);
-            }
-            catch {
-                return { result: raw };
-            }
-        }
-    }
-    return task;
-}
-async function resolveSetupCompany() {
-    const setup = resolveSetupConn();
-    if (setup.companyId)
-        return { id: setup.companyId, name: setup.companyId };
-    const companies = await listCompanies(setup.tenantId, setup.environment);
-    if (!companies.length)
-        throw new Error("No companies in setup environment.");
-    return { id: companies[0].id, name: companies[0].displayName };
-}
 // ── Registration ────────────────────────────────────────────────────────────
 function registerMemoryTool(server, name, title, description, messageType, mode, scope) {
     if (mode === "set") {
@@ -98,15 +55,6 @@ function registerMemoryTool(server, name, title, description, messageType, mode,
                 record.description = String(desc);
             if (memory != null)
                 record.memory = String(memory);
-            if (scope === "default") {
-                const setupCompany = await resolveSetupCompany();
-                const result = await setupBcTask(setupCompany.id, {
-                    specversion: "1.0", type: messageType, source: MCP_SOURCE,
-                    data: JSON.stringify({ data: [record] }),
-                    ...(lcid != null ? { lcid } : {}),
-                });
-                return json({ company: setupCompany.name, ...result });
-            }
             const t = await resolveTarget({ companyId });
             const result = await bcTask(t.tenantId, t.environment, t.companyId, {
                 specversion: "1.0", type: messageType, source: MCP_SOURCE,
@@ -138,19 +86,6 @@ function registerMemoryTool(server, name, title, description, messageType, mode,
         const baseData = {};
         if (tableView)
             baseData.tableView = String(tableView);
-        if (scope === "default") {
-            const setupCompany = await resolveSetupCompany();
-            if (fetchAll) {
-                const paged = await fetchAllPages(resolveSetupConn().tenantId, resolveSetupConn().environment, setupCompany.id, messageType, baseData, { lcid: lcid ?? undefined }, batchSize);
-                return json({ company: setupCompany.name, skip: 0, take: paged.fetched, fetchAll: true, ...paged });
-            }
-            const result = await setupBcTask(setupCompany.id, {
-                specversion: "1.0", type: messageType, source: MCP_SOURCE,
-                data: JSON.stringify({ ...baseData, skip: capSkip, take: capTake }),
-                ...(lcid != null ? { lcid } : {}),
-            });
-            return json({ company: setupCompany.name, skip: capSkip, take: capTake, ...result });
-        }
         const t = await resolveTarget({ companyId });
         if (fetchAll) {
             const paged = await fetchAllPages(t.tenantId, t.environment, t.companyId, messageType, baseData, { lcid: lcid ?? undefined }, batchSize);
@@ -173,9 +108,6 @@ export function registerMemoryConfigTools(server) {
     registerMemoryTool(server, "list_user_memory", "List user memory", "Lists user-scoped memory entries.", "Memory.User.List", "list", "user");
     registerMemoryTool(server, "get_user_memory", "Get user memory", "Gets user-scoped memory entry content.", "Memory.User.Get", "get", "user");
     registerMemoryTool(server, "set_user_memory", "Set user memory", "Creates or updates a user-scoped memory entry.", "Memory.User.Set", "set", "user");
-    // Default memory (setup connection)
-    registerMemoryTool(server, "list_default_memory", "List default memory", "Lists default memory entries from the central setup environment.", "Memory.Company.List", "list", "default");
-    registerMemoryTool(server, "get_default_memory", "Get default memory", "Gets default memory entry content from the central setup environment.", "Memory.Company.Get", "get", "default");
     // ── set_config ──────────────────────────────────────────────────────────
     server.registerTool("set_config", {
         title: "Set config",

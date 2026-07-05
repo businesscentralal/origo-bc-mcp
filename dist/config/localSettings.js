@@ -85,16 +85,4 @@ export function isBasicAuthEnabled() {
     const ls = getLocalSettings();
     return Boolean(ls.basicAuth?.enabled && ls.basicAuth.username && ls.basicAuth.password);
 }
-/** Returns the connection name designated as the setup environment, or undefined. */
-export function getSetupConnectionName() {
-    const ls = getLocalSettings();
-    return ls.setupConnection;
-}
-/** Returns the resolved DevConnection for the setup environment, or undefined. */
-export function getSetupConnection() {
-    const name = getSetupConnectionName();
-    if (!name)
-        return undefined;
-    return getConnection(name);
-}
 //# sourceMappingURL=localSettings.js.map

@@ -55,8 +55,5 @@
       "environment": "sandbox",
       "companyId": "<company-guid>"
     }
-  },
-
-  "setupConnection": "production",
-  "_setupConnection_comment": "Which connection to use for the setup environment (default memory, UBL templates). Must be a SaaS connection with companyId."
+  }
 }

@@ -301,20 +301,22 @@ export async function bcQueueStatus(tenantId, environment, companyId, queueId) {
                 }
             }
             const dataRes = await bcFetch(dataUrl, { method: "GET", headers: { Authorization: auth } });
-            if (isBinary) {
-                const buf = Buffer.from(await dataRes.arrayBuffer());
-                bcResponse = { datacontenttype: datacontenttype || "application/octet-stream", dataBase64: buf.toString("base64") };
-            }
-            else if (isText) {
-                bcResponse = await dataRes.text();
-            }
-            else {
-                const dataRaw = await dataRes.text();
-                try {
-                    bcResponse = JSON.parse(dataRaw);
+            if (dataRes.ok) {
+                if (isBinary) {
+                    const buf = Buffer.from(await dataRes.arrayBuffer());
+                    bcResponse = { datacontenttype: datacontenttype || "application/octet-stream", dataBase64: buf.toString("base64") };
                 }
-                catch {
-                    bcResponse = dataRaw;
+                else if (isText) {
+                    bcResponse = await dataRes.text();
+                }
+                else {
+                    const dataRaw = await dataRes.text();
+                    try {
+                        bcResponse = JSON.parse(dataRaw);
+                    }
+                    catch {
+                        bcResponse = dataRaw;
+                    }
                 }
             }
         }

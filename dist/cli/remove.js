@@ -115,10 +115,6 @@ export async function runRemove(name) {
             delete settings.connections;
         }
     }
-    // Clear setupConnection if it pointed to the removed connection
-    if (settings.setupConnection === name) {
-        delete settings.setupConnection;
-    }
     writeJson(settingsPath, settings);
     console.log(`✓ Connection "${name}" removed from ${settingsPath}`);
     // Remove from VS Code mcp.json
