@@ -22,10 +22,18 @@ export const ollamaProxyRouter = Router();
 ollamaProxyRouter.post("/v1/chat/completions", async (req, res) => {
     const targetUrl = `${OLLAMA_BASE}/v1/chat/completions`;
     const t0 = Date.now();
-    log(`→ ${targetUrl} model=${req.body?.model}`);
     // Normalize request: stringify any function.arguments objects in message history
     // (OpenClaw may send them as objects; Ollama's Go expects strings)
     normalizeRequestMessages(req.body);
+    // Pass through num_ctx from the client if provided (top-level or options).
+    // This lets the model's Modelfile default apply when no override is sent.
+    const numCtx = req.body?.num_ctx || req.body?.options?.num_ctx;
+    if (numCtx) {
+        if (!req.body.options)
+            req.body.options = {};
+        req.body.options.num_ctx = numCtx;
+    }
+    log(`→ ${targetUrl} model=${req.body?.model} num_ctx=${req.body?.options?.num_ctx || 'model-default'}`);
     try {
         const ollamaRes = await fetch(targetUrl, {
             method: "POST",
