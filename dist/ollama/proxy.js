@@ -17,28 +17,36 @@ const OLLAMA_BASE = process.env.OLLAMA_PROXY_TARGET || "http://192.168.16.241:11
 export const ollamaProxyRouter = Router();
 /**
  * POST /ollama/v1/chat/completions
- * Proxies to Ollama's OpenAI-compatible endpoint and normalizes tool call arguments.
+ * Accepts OpenAI-format requests, forwards to Ollama's native /api/chat endpoint
+ * (which doesn't hang with qwen3 + large tool prompts), then converts the response
+ * back to OpenAI format with normalized tool call arguments.
  */
 ollamaProxyRouter.post("/v1/chat/completions", async (req, res) => {
-    const targetUrl = `${OLLAMA_BASE}/v1/chat/completions`;
+    const targetUrl = `${OLLAMA_BASE}/api/chat`;
     const t0 = Date.now();
     // Normalize request: stringify any function.arguments objects in message history
-    // (OpenClaw may send them as objects; Ollama's Go expects strings)
     normalizeRequestMessages(req.body);
-    // Pass through num_ctx from the client if provided (top-level or options).
-    // This lets the model's Modelfile default apply when no override is sent.
-    const numCtx = req.body?.num_ctx || req.body?.options?.num_ctx;
-    if (numCtx) {
-        if (!req.body.options)
-            req.body.options = {};
-        req.body.options.num_ctx = numCtx;
-    }
-    log(`→ ${targetUrl} model=${req.body?.model} num_ctx=${req.body?.options?.num_ctx || 'model-default'}`);
+    // Normalize message content: Ollama native API requires content as string,
+    // but OpenAI format allows arrays like [{type:"text",text:"..."}]
+    normalizeMessageContent(req.body);
+    // Convert OpenAI-style request to Ollama native format
+    // Use streaming so OpenClaw sees tokens immediately (avoids idle timeout + better UX)
+    const nativeBody = {
+        model: req.body?.model,
+        messages: req.body?.messages,
+        stream: true,
+        options: req.body?.options || {},
+    };
+    if (req.body?.tools)
+        nativeBody.tools = req.body.tools;
+    if (req.body?.max_tokens)
+        nativeBody.options.num_predict = req.body.max_tokens;
+    log(`→ ${targetUrl} model=${nativeBody.model} stream=${nativeBody.stream} bodySize=${JSON.stringify(nativeBody).length} messages=${nativeBody.messages?.length} tools=${req.body?.tools?.length || 0}`);
     try {
         const ollamaRes = await fetch(targetUrl, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify(req.body),
+            body: JSON.stringify(nativeBody),
         });
         if (!ollamaRes.ok) {
             const errText = await ollamaRes.text();
@@ -46,8 +54,8 @@ ollamaProxyRouter.post("/v1/chat/completions", async (req, res) => {
             res.status(ollamaRes.status).send(errText);
             return;
         }
-        // Streaming: pass through and normalize each SSE chunk
-        if (req.body?.stream) {
+        // Streaming: read Ollama native stream, convert each chunk to OpenAI SSE format
+        if (nativeBody.stream) {
             res.setHeader("Content-Type", "text/event-stream");
             res.setHeader("Cache-Control", "no-cache");
             res.setHeader("Connection", "keep-alive");
@@ -57,15 +65,30 @@ ollamaProxyRouter.post("/v1/chat/completions", async (req, res) => {
                 return;
             }
             const decoder = new TextDecoder();
+            let buffer = "";
             try {
                 while (true) {
                     const { done, value } = await reader.read();
                     if (done)
                         break;
-                    const chunk = decoder.decode(value, { stream: true });
-                    // Normalize each SSE line that contains tool_calls
-                    const normalized = normalizeStreamChunk(chunk);
-                    res.write(normalized);
+                    buffer += decoder.decode(value, { stream: true });
+                    const lines = buffer.split("\n");
+                    buffer = lines.pop() || "";
+                    for (const line of lines) {
+                        if (!line.trim())
+                            continue;
+                        try {
+                            const native = JSON.parse(line);
+                            const openaiChunk = nativeChunkToOpenAI(native);
+                            if (openaiChunk) {
+                                res.write(`data: ${JSON.stringify(openaiChunk)}\n\n`);
+                            }
+                            if (native.done) {
+                                res.write("data: [DONE]\n\n");
+                            }
+                        }
+                        catch { /* skip malformed lines */ }
+                    }
                 }
             }
             finally {
@@ -75,11 +98,11 @@ ollamaProxyRouter.post("/v1/chat/completions", async (req, res) => {
             }
             return;
         }
-        // Non-streaming: parse, normalize, return
-        const body = await ollamaRes.json();
-        normalizeResponse(body);
-        log(`← 200 in ${Date.now() - t0}ms choices=${body.choices?.length} tool_calls=${hasToolCalls(body)}`);
-        res.json(body);
+        // Non-streaming: convert Ollama native response to OpenAI format
+        const native = await ollamaRes.json();
+        const openaiResponse = nativeToOpenAI(native);
+        log(`← 200 in ${Date.now() - t0}ms tool_calls=${!!(openaiResponse.choices?.[0]?.message?.tool_calls)}`);
+        res.json(openaiResponse);
     }
     catch (err) {
         const msg = err.message;
@@ -101,49 +124,106 @@ ollamaProxyRouter.get("/v1/models", async (_req, res) => {
     }
 });
 /**
- * Normalize a non-streaming response: ensure all function.arguments are strings.
+ * Convert Ollama native non-streaming response to OpenAI format.
  */
-function normalizeResponse(body) {
-    const choices = body.choices;
-    if (!choices)
+function nativeToOpenAI(native) {
+    const msg = native.message || {};
+    const message = { role: msg.role || "assistant", content: msg.content || "" };
+    // Convert tool_calls and normalize arguments to strings
+    if (msg.tool_calls) {
+        const toolCalls = msg.tool_calls.map((tc, i) => {
+            const fn = tc.function || {};
+            return {
+                id: `call_${Date.now().toString(36)}_${i}`,
+                index: i,
+                type: "function",
+                function: {
+                    name: fn.name,
+                    arguments: typeof fn.arguments === "string" ? fn.arguments : JSON.stringify(fn.arguments),
+                },
+            };
+        });
+        message.tool_calls = toolCalls;
+    }
+    return {
+        id: `chatcmpl-${Date.now()}`,
+        object: "chat.completion",
+        created: Math.floor(Date.now() / 1000),
+        model: native.model,
+        choices: [{ index: 0, message, finish_reason: msg.tool_calls ? "tool_calls" : "stop" }],
+        usage: native.prompt_eval_count != null ? {
+            prompt_tokens: native.prompt_eval_count,
+            completion_tokens: native.eval_count,
+            total_tokens: native.prompt_eval_count + (native.eval_count || 0),
+        } : undefined,
+    };
+}
+/**
+ * Convert a single Ollama native streaming chunk to OpenAI SSE delta format.
+ */
+function nativeChunkToOpenAI(native) {
+    const msg = native.message;
+    if (!msg)
+        return null;
+    const delta = {};
+    if (msg.role)
+        delta.role = msg.role;
+    if (msg.content)
+        delta.content = msg.content;
+    if (msg.tool_calls) {
+        const toolCalls = msg.tool_calls.map((tc, i) => {
+            const fn = tc.function || {};
+            return {
+                id: `call_${Date.now().toString(36)}_${i}`,
+                index: i,
+                type: "function",
+                function: {
+                    name: fn.name,
+                    arguments: typeof fn.arguments === "string" ? fn.arguments : JSON.stringify(fn.arguments),
+                },
+            };
+        });
+        delta.tool_calls = toolCalls;
+    }
+    return {
+        id: `chatcmpl-${Date.now()}`,
+        object: "chat.completion.chunk",
+        created: Math.floor(Date.now() / 1000),
+        model: native.model,
+        choices: [{ index: 0, delta, finish_reason: native.done ? (msg.tool_calls ? "tool_calls" : "stop") : null }],
+    };
+}
+/**
+ * Normalize message content from OpenAI array/object format to plain strings.
+ * Ollama native API requires content to always be a string.
+ */
+function normalizeMessageContent(body) {
+    if (!body)
         return;
-    for (const choice of choices) {
-        const message = choice.message;
-        if (!message)
-            continue;
-        normalizeToolCalls(message);
+    const messages = body.messages;
+    if (!messages)
+        return;
+    for (const msg of messages) {
+        if (msg.content === null || msg.content === undefined) {
+            msg.content = "";
+        }
+        else if (Array.isArray(msg.content)) {
+            // Extract text parts and join them
+            const textParts = msg.content
+                .filter((p) => p.type === "text" || !p.type)
+                .map((p) => (p.text || p.content || ""));
+            msg.content = textParts.join("\n");
+        }
+        else if (typeof msg.content === "object") {
+            // Stringify any object content (e.g. tool results)
+            msg.content = JSON.stringify(msg.content);
+        }
     }
 }
 /**
- * Normalize streaming SSE chunks containing tool_calls.
- */
-function normalizeStreamChunk(chunk) {
-    // SSE format: "data: {...}\n\n"
-    return chunk.replace(/^data: (.+)$/gm, (_match, jsonStr) => {
-        if (jsonStr === "[DONE]")
-            return `data: [DONE]`;
-        try {
-            const parsed = JSON.parse(jsonStr);
-            const choices = parsed.choices;
-            if (choices) {
-                for (const choice of choices) {
-                    const delta = choice.delta;
-                    if (delta)
-                        normalizeToolCalls(delta);
-                }
-            }
-            return `data: ${JSON.stringify(parsed)}`;
-        }
-        catch {
-            // Not valid JSON, pass through unchanged
-            return `data: ${jsonStr}`;
-        }
-    });
-}
-/**
- * Normalize outbound request: stringify function.arguments in message history.
- * OpenClaw (or other clients) may send tool_calls with arguments as objects,
- * but Ollama's Go backend requires them as strings.
+ * Normalize outbound request for Ollama native API:
+ * - Parse string arguments BACK to objects (native API wants objects, not strings)
+ * - OpenClaw sends arguments as strings (OpenAI format), Ollama native wants objects
  */
 function normalizeRequestMessages(body) {
     if (!body)
@@ -152,7 +232,21 @@ function normalizeRequestMessages(body) {
     if (!messages)
         return;
     for (const msg of messages) {
-        normalizeToolCalls(msg);
+        const toolCalls = msg.tool_calls;
+        if (!toolCalls)
+            continue;
+        for (const tc of toolCalls) {
+            const fn = tc.function;
+            if (!fn)
+                continue;
+            // Parse string arguments to objects for native API
+            if (typeof fn.arguments === "string") {
+                try {
+                    fn.arguments = JSON.parse(fn.arguments);
+                }
+                catch { /* leave as-is if not valid JSON */ }
+            }
+        }
     }
 }
 /**
