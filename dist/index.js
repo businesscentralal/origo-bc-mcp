@@ -5,14 +5,18 @@ import { randomUUID } from "node:crypto";
 import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/streamableHttp.js";
 import { config } from "./config.js";
 import { authMiddleware } from "./auth/middleware.js";
-import { buildServer } from "./server.js";
+import { buildServer, buildLiteServer } from "./server.js";
 import { clearSession } from "./session/store.js";
 import { dashboardRouter, setSessionTracker } from "./dashboard/index.js";
 import { ollamaProxyRouter } from "./ollama/proxy.js";
 const debug = config.debug;
+const liteMode = process.env.MCP_LITE === "1";
 function log(...args) {
     if (debug)
         console.log("[MCP]", ...args);
+}
+function createServer() {
+    return liteMode ? buildLiteServer() : buildServer();
 }
 const app = express();
 app.use(express.json({ limit: "8mb" }));
@@ -59,7 +63,7 @@ app.post("/mcp", authMiddleware, async (req, res) => {
                     delete transports[transport.sessionId];
                 }
             };
-            const server = buildServer();
+            const server = createServer();
             await server.connect(transport);
         }
         else {
@@ -68,7 +72,7 @@ app.post("/mcp", authMiddleware, async (req, res) => {
             transport = new StreamableHTTPServerTransport({
                 sessionIdGenerator: undefined, // stateless — no session validation
             });
-            const server = buildServer();
+            const server = createServer();
             await server.connect(transport);
         }
         await transport.handleRequest(req, res, req.body);
@@ -104,10 +108,12 @@ app.use("/dashboard", dashboardRouter);
 // --- Ollama proxy (normalizes tool call arguments) ------------------------
 app.use("/ollama", ollamaProxyRouter);
 app.listen(config.port, () => {
-    console.log(`origo-bc-mcp listening on :${config.port} (${config.nodeEnv})`);
+    console.log(`origo-bc-mcp listening on :${config.port} (${config.nodeEnv}${liteMode ? ", LITE" : ""})`);
     console.log(`  MCP endpoint:    ${config.publicUrl}/mcp`);
     console.log(`  Dashboard:       ${config.publicUrl}/dashboard`);
     console.log(`  Health:          ${config.publicUrl}/healthz`);
+    if (liteMode)
+        console.log(`  LITE MODE:       reduced tool set for local LLMs`);
     if (debug)
         console.log(`  DEBUG MODE:      enabled (all requests/responses logged)`);
 });
