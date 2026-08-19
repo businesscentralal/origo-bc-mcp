@@ -136,10 +136,11 @@ export function registerDataRecordTools(server) {
                 primaryKey: z.record(z.unknown()).describe("Key fields identifying the record."),
                 fields: z.record(z.unknown()).optional().describe("Non-key fields to write."),
             })).describe("Array of records to write."),
+            force: z.boolean().optional().describe("Bypass ChangeLog Write Guard when mode is 'Via force'."),
             lcid: z.number().int().optional(),
             companyId: z.string().optional(),
         },
-    }, async ({ table, data, lcid, companyId }) => {
+    }, async ({ table, data, force, lcid, companyId }) => {
         validateTableName(table);
         if (!data.length)
             throw new Error("data must be a non-empty array.");
@@ -164,7 +165,7 @@ export function registerDataRecordTools(server) {
             type: "Data.Records.Set",
             source: MCP_SOURCE,
             subject: String(table),
-            data: JSON.stringify({ data }),
+            data: JSON.stringify({ data, ...(force ? { force: true } : {}) }),
             ...(lcid != null ? { lcid } : {}),
         });
         const records = (result.result ?? result.value ?? []);
