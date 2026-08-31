@@ -7,20 +7,70 @@ const MCP_SOURCE = "Origo-BC Cloud Events MCP";
 export function registerMessageTypeTools(server) {
     server.registerTool("list_message_types", {
         title: "List message types",
-        description: "Lists available Cloud Events message types registered in the BC environment.",
+        description: "Lists enabled message types. No params = namespace overview (compact). " +
+            "Add namespace or search to drill in with paging.",
         inputSchema: {
+            namespace: z.string().optional().describe("Filter by namespace prefix (e.g. Sales, Help, Finance)."),
+            search: z.string().optional().describe("Filter types whose name or description contains this text."),
+            skip: z.number().int().optional().describe("Paging offset (default 0)."),
+            take: z.number().int().optional().describe("Max results (default 25)."),
             lcid: z.number().int().optional(),
             companyId: z.string().optional(),
         },
-    }, async ({ lcid, companyId }) => {
+    }, async ({ namespace, search, skip: skipParam, take: takeParam, lcid, companyId }) => {
         const t = await resolveTarget({ companyId });
         const result = await bcTask(t.tenantId, t.environment, t.companyId, {
             specversion: "1.0",
             type: "Help.MessageTypes.Get",
             source: MCP_SOURCE,
+            data: JSON.stringify({ onlyEnabled: true }),
             ...(lcid != null ? { lcid } : {}),
         });
-        return json({ company: t.companyName, ...result });
+        const allTypes = (result.result ?? []);
+        const skipN = skipParam ?? 0;
+        const takeN = takeParam ?? 25;
+        const nsFilter = namespace ?? "";
+        const searchFilter = search ?? "";
+        const searchLower = searchFilter.toLowerCase();
+        const isCompact = nsFilter === "" && searchFilter === "" && skipN === 0;
+        const nsCounts = {};
+        const matched = [];
+        for (const t of allTypes) {
+            const dotPos = t.name.indexOf(".");
+            const nsPrefix = dotPos > 0 ? t.name.slice(0, dotPos) : t.name;
+            nsCounts[nsPrefix] = (nsCounts[nsPrefix] ?? 0) + 1;
+            if (isCompact)
+                continue;
+            if (nsFilter && nsPrefix !== nsFilter)
+                continue;
+            if (searchFilter) {
+                const nameLower = t.name.toLowerCase();
+                const descLower = (t.description ?? "").toLowerCase();
+                if (!nameLower.includes(searchLower) && !descLower.includes(searchLower))
+                    continue;
+            }
+            matched.push({
+                name: t.name,
+                description: t.description ?? "",
+                direction: t.messageDirection ?? "",
+            });
+        }
+        const namespaces = Object.entries(nsCounts).map(([ns, count]) => ({ namespace: ns, count }));
+        const response = {
+            company: t.companyName,
+            status: "Success",
+            namespaces,
+        };
+        if (!isCompact) {
+            const paged = matched.slice(skipN, skipN + takeN);
+            response.result = paged;
+            response.totalMatches = matched.length;
+            response.returned = paged.length;
+            response.skip = skipN;
+            response.hasMore = matched.length > skipN + paged.length;
+        }
+        response.usage = "Use namespace or search to filter. Call get_message_type_help for detailed usage of a specific type.";
+        return json(response);
     });
     server.registerTool("get_message_type_help", {
         title: "Get message type help",
