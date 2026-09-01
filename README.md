@@ -2,6 +2,26 @@
 
 Origo Business Central MCP server — connects AI clients (VS Code Copilot, Claude Desktop, etc.) to Business Central via the Cloud Events API.
 
+## Features
+
+| Area | Tools | Description |
+|------|-------|-------------|
+| Discovery | `who_am_i`, `bc_list_tenants`, `bc_list_environments`, `bc_list_companies`, `bc_select`, `bc_get_selection` | Auth check and tenant/environment/company selection |
+| Table metadata | `list_tables`, `get_table_info`, `get_table_fields`, `get_table_relations`, `get_table_permissions`, `get_page_url` | AL table/field schema introspection |
+| Data records | `get_records`, `set_records`, `get_record_ids`, `get_document_lines`, `batch_records` | Read/write any BC table via Cloud Events |
+| Search | `search_customers`, `search_vendors`, `search_items`, `search_gl_accounts`, `search_bank_accounts`, `search_employees`, `search_contacts`, `search_resources`, `search_fixed_assets`, `search_projects`, `search_records` | Full-text search across common master data |
+| Totals & aging | `get_record_count`, `get_decimal_total`, `compute_customer_aging`, `compute_vendor_aging`, `compute_period_breakdown` | Aggregations without pulling raw rows |
+| Message types | `list_message_types`, `get_message_type_help`, `call_message_type`, `invoke_message_type` (lite) | Generic access to any BC Cloud Event message type |
+| Queue | `queue_get_status`, `queue_retry`, `queue_cancel` | Manage async Cloud Event queue tasks |
+| Translations | `list_translations`, `get_field_translations`, `get_field_translation`, `set_field_translation`, `set_translations` | Multi-language field translation management |
+| Integration timestamps | `get_integration_timestamp`, `set_integration_timestamp`, `reverse_integration_timestamp` | Track last-sync watermarks for external integrations |
+| Memory & config | `list_company_memory`, `get_company_memory`, `set_company_memory`, `list_user_memory`, `get_user_memory`, `set_user_memory`, `get_config`, `set_config` | Persistent notes/config stored in BC's Cloud Event Config Store |
+| Incoming documents | `create_incoming_document`, `extract_incoming_document_attachments`, `process_incoming_document` | Upload and process incoming document attachments |
+| Crypto | `encrypt_data`, `encode_base64`, `decode_base64` | AES-256-GCM encryption and base64 helpers |
+| Business events | `list_bc_business_event_definitions`, `list_bc_business_event_subscriptions`, `create_bc_business_event_subscription`, `delete_bc_business_event_subscription`, `renew_bc_business_event_subscription` | Manage `[ExternalBusinessEvent]` subscriptions |
+| **API/OData testing** | `bc_list_api_endpoints`, `bc_get_api_metadata`, `bc_api_request` | Discover, inspect, and test any BC API v2.0 or custom API page endpoint — full CRUD (GET/POST/PATCH/DELETE), `$metadata` parsing (fields, keys, nav properties), and OData query support (`$filter`, `$select`, `$top`, `$orderby`, `$expand`) |
+| Skills | `get_cloud_events_api_skill` | Bundled reference docs for the Cloud Events API |
+
 ## Prerequisites
 
 - **Node.js 22+** — [nodejs.org](https://nodejs.org) (LTS recommended)
@@ -83,6 +103,27 @@ origo-bc-mcp-server clean
 ```
 
 Removes the entire `local.settings.json`, all `origo-bc-*` entries from VS Code's `mcp.json`, and all desktop shortcuts. Use this to start fresh. Prompts for confirmation.
+## Server modes (full vs lite)
+
+By default the server runs in **full mode** — all tool groups from the Features table above are registered (~75 tools). This is best for capable models (GPT-4o, Claude Sonnet, etc.) that handle large tool sets well.
+
+**Lite mode** registers a reduced set (~26 tools) built around `invoke_message_type` as a universal entry point, plus data records, aging, period breakdown, crypto, memory, and the Cloud Events skill doc. Use this for local/smaller LLMs that get confused or slow down with too many tool definitions. The API endpoint testing tools (`bc_list_api_endpoints`, `bc_get_api_metadata`, `bc_api_request`) are **not** included in lite mode.
+
+Enable lite mode with an environment variable:
+
+```bash
+MCP_LITE=1 origo-bc-mcp-server          # macOS/Linux
+$env:MCP_LITE="1"; origo-bc-mcp-server   # Windows PowerShell
+```
+
+The startup banner confirms which mode is active:
+
+```
+origo-bc-mcp listening on :3000 (development, LITE)
+  LITE MODE:       reduced tool set for local LLMs
+```
+
+To use lite mode with a named connection or PM2, set `MCP_LITE=1` in that process's environment (e.g. `ecosystem.config.cjs` `env` block for a second PM2 app entry).
 
 ## Start the server
 
