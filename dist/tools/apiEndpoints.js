@@ -40,19 +40,39 @@ function parseEntityType(xml, typeName) {
         const name = attrs.match(/Name="([^"]+)"/)?.[1] ?? "";
         const type = attrs.match(/Type="([^"]+)"/)?.[1] ?? "";
         const nullable = !attrs.includes('Nullable="false"');
-        if (name)
-            properties.push({ name, type, nullable });
+        const maxLenMatch = attrs.match(/MaxLength="(\d+)"/);
+        const scaleMatch = attrs.match(/Scale="([^"]+)"/);
+        if (name) {
+            const prop = { name, type, nullable };
+            if (maxLenMatch)
+                prop.maxLength = Number(maxLenMatch[1]);
+            if (scaleMatch)
+                prop.scale = scaleMatch[1];
+            properties.push(prop);
+        }
     }
     const navProperties = [];
-    const navRe = /<NavigationProperty\s+([^>]*)\/?>/g;
+    // Match nav properties including their child ReferentialConstraint elements
+    const navBlockRe = /<NavigationProperty\s+([^>]*?)(?:\/>|>([\s\S]*?)<\/NavigationProperty>)/g;
     let nm;
-    while ((nm = navRe.exec(block)) !== null) {
+    while ((nm = navBlockRe.exec(block)) !== null) {
         const attrs = nm[1];
+        const inner = nm[2] ?? "";
         const name = attrs.match(/Name="([^"]+)"/)?.[1] ?? "";
         const type = attrs.match(/Type="([^"]+)"/)?.[1] ?? "";
         const containsTarget = attrs.includes('ContainsTarget="true"');
-        if (name)
-            navProperties.push({ name, type, containsTarget });
+        if (!name)
+            continue;
+        const nav = { name, type, containsTarget };
+        const rcRe = /<ReferentialConstraint\s+Property="([^"]+)"\s+ReferencedProperty="([^"]+)"/g;
+        let rc;
+        const constraints = [];
+        while ((rc = rcRe.exec(inner)) !== null) {
+            constraints.push({ property: rc[1], referencedProperty: rc[2] });
+        }
+        if (constraints.length)
+            nav.referentialConstraints = constraints;
+        navProperties.push(nav);
     }
     return { name: shortName, keys, properties, navProperties };
 }
@@ -130,6 +150,8 @@ export function registerApiEndpointTools(server) {
                 type: p.type,
                 nullable: p.nullable,
                 isKey: entityType.keys.includes(p.name),
+                ...(p.maxLength !== undefined ? { maxLength: p.maxLength } : {}),
+                ...(p.scale !== undefined ? { scale: p.scale } : {}),
             })),
             navigationProperties: entityType.navProperties,
             durationMs: res.durationMs,
