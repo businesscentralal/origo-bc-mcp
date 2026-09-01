@@ -371,6 +371,85 @@ export async function bcGet(tenantId, path) {
         throw new Error(`BC API HTTP ${res.status}: ${(await res.text()).slice(0, 300)}`);
     return (await res.json());
 }
+function buildApiBaseUrl(tenantId, environment, opts) {
+    const ctx = getAuthContext();
+    if (opts?.publisher && opts?.group && opts?.version) {
+        if (ctx.conn.onPrem) {
+            const base = ctx.conn.baseUrl.replace(/\/$/, "");
+            const tenant = ctx.conn.onPremTenant ?? "default";
+            return {
+                baseUrl: `${base}/api/${opts.publisher}/${opts.group}/${opts.version}`,
+                querySuffix: `?tenant=${encodeURIComponent(tenant)}`,
+            };
+        }
+        return {
+            baseUrl: `https://${BC_HOST}/v2.0/${tenantId}/${environment}/api/${opts.publisher}/${opts.group}/${opts.version}`,
+            querySuffix: "",
+        };
+    }
+    // Standard API v2.0
+    if (ctx.conn.onPrem) {
+        const base = ctx.conn.baseUrl.replace(/\/$/, "");
+        const tenant = ctx.conn.onPremTenant ?? "default";
+        return {
+            baseUrl: `${base}/api/v2.0`,
+            querySuffix: `?tenant=${encodeURIComponent(tenant)}`,
+        };
+    }
+    return {
+        baseUrl: `https://${BC_HOST}/v2.0/${tenantId}/${environment}/api/v2.0`,
+        querySuffix: "",
+    };
+}
+export async function bcApiRequest(tenantId, environment, method, path, opts) {
+    const ctx = getAuthContext();
+    const { baseUrl, querySuffix } = buildApiBaseUrl(tenantId, environment, opts);
+    let url = `${baseUrl}/${path}`;
+    // Append OData query params for GET
+    if (opts?.params && Object.keys(opts.params).length) {
+        const qs = new URLSearchParams(opts.params).toString();
+        url += querySuffix ? `${querySuffix}&${qs}` : `?${qs}`;
+    }
+    else if (querySuffix) {
+        url += querySuffix;
+    }
+    const auth = ctx.conn.onPrem
+        ? onPremAuthHeader(ctx.conn)
+        : `Bearer ${await getBcAccessToken(tenantId)}`;
+    const headers = {
+        Authorization: auth,
+        Accept: opts?.accept ?? "application/json",
+    };
+    if (method === "POST" || method === "PATCH") {
+        headers["Content-Type"] = "application/json";
+    }
+    if ((method === "PATCH" || method === "DELETE") && opts?.etag !== undefined) {
+        headers["If-Match"] = opts.etag;
+    }
+    else if (method === "PATCH" || method === "DELETE") {
+        headers["If-Match"] = "*";
+    }
+    dbg(`${method} ${url}`);
+    const start = Date.now();
+    const res = await bcFetch(url, {
+        method,
+        headers,
+        ...(opts?.body !== undefined ? { body: JSON.stringify(opts.body) } : {}),
+    });
+    const durationMs = Date.now() - start;
+    const respHeaders = {};
+    for (const [k, v] of res.headers.entries())
+        respHeaders[k] = v;
+    const raw = await res.text();
+    let body;
+    try {
+        body = JSON.parse(raw);
+    }
+    catch {
+        body = raw || null;
+    }
+    return { status: res.status, headers: respHeaders, body, durationMs };
+}
 // ── fetchAllPages — paginate through all results ────────────────────────────
 export async function fetchAllPages(tenantId, environment, companyId, messageType, dataPayload, extraEnvelope = {}, batchSize = FETCH_ALL_BATCH_SIZE, maxRecords = FETCH_ALL_MAX_RECORDS) {
     let skip = 0;
