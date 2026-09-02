@@ -11,9 +11,11 @@
 import { Router } from "express";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
+import { randomBytes, createHash } from "node:crypto";
 import { validateConnection } from "../cli/validate.js";
-import { encryptSecret, canEncryptSecrets } from "../config/resolveSecret.js";
+import { encryptSecret, canEncryptSecrets, wrapDpapi, writeKeychain, resolveSecret } from "../config/resolveSecret.js";
 import { invalidateSettingsCache } from "../config/localSettings.js";
+import { config } from "../config.js";
 const TOKEN_HOST = "login.microsoftonline.com";
 const BC_SCOPE = "https://api.businesscentral.dynamics.com/.default";
 const router = Router();
@@ -46,10 +48,10 @@ function writeConfig(config) {
 }
 /**
  * Encrypts secret fields in a connection object before writing to disk.
- * Uses AES-256-GCM via MCP_ENCRYPTION_KEY. Falls back to plain: prefix on Linux
- * when no key is set. On Windows, leaves values as-is (DPAPI used by CLI setup).
+ * Prefers AES-256-GCM (MCP_ENCRYPTION_KEY); falls back to Windows DPAPI or
+ * macOS Keychain so secrets are never left as bare, unmarked plaintext.
  */
-function encryptConnectionSecrets(conn) {
+function encryptConnectionSecrets(conn, connName) {
     const secretFields = ["clientSecret", "refreshToken", "key"];
     for (const field of secretFields) {
         const value = conn[field];
@@ -63,11 +65,26 @@ function encryptConnectionSecrets(conn) {
         if (encrypted) {
             conn[field] = encrypted;
         }
-        else if (process.platform !== "win32") {
-            // On non-Windows without encryption key, mark as plain (explicit)
+        else if (process.platform === "win32") {
+            conn[field] = wrapDpapi(value);
+        }
+        else if (process.platform === "darwin") {
+            conn[field] = writeKeychain(`origo-bc-mcp-${connName}-${field}`, value);
+        }
+        else {
+            // No OS-level secret store available — mark explicitly rather than leaving bare plaintext.
             conn[field] = `plain:${value}`;
         }
     }
+}
+function secretStorageMethod() {
+    if (canEncryptSecrets())
+        return "aes-256-gcm";
+    if (process.platform === "win32")
+        return "dpapi";
+    if (process.platform === "darwin")
+        return "keychain";
+    return "plaintext";
 }
 // ── API Routes ───────────────────────────────────────────────────────────────
 router.get("/api/connections", (_req, res) => {
@@ -100,7 +117,7 @@ router.get("/api/connections", (_req, res) => {
         connections,
         encryption: {
             available: canEncryptSecrets(),
-            method: canEncryptSecrets() ? "aes-256-gcm" : (process.platform === "win32" ? "dpapi" : "none"),
+            method: secretStorageMethod(),
         },
     });
 });
@@ -111,9 +128,9 @@ router.post("/api/connections", (req, res) => {
         config.basicAuth = basicAuth;
     }
     if (connection && name) {
-        // Encrypt secret fields at rest when MCP_ENCRYPTION_KEY is available
+        // Encrypt secret fields at rest (AES-256-GCM, or DPAPI/Keychain fallback)
         const connToSave = { ...connection };
-        encryptConnectionSecrets(connToSave);
+        encryptConnectionSecrets(connToSave, name);
         if (name === "default") {
             config.devConnection = connToSave;
         }
@@ -124,7 +141,7 @@ router.post("/api/connections", (req, res) => {
         }
     }
     writeConfig(config);
-    res.json({ ok: true, configPath: getConfigPath(), encrypted: canEncryptSecrets() });
+    res.json({ ok: true, configPath: getConfigPath(), encrypted: canEncryptSecrets(), secretStorageMethod: secretStorageMethod() });
 });
 router.post("/api/connections/validate", async (req, res) => {
     const { connection, connectionName } = req.body;
@@ -151,7 +168,7 @@ router.post("/api/connections/validate", async (req, res) => {
                 baseUrl: connToValidate.baseUrl,
                 onPremTenant: connToValidate.onPremTenant,
                 user: connToValidate.user,
-                key: connToValidate.key,
+                key: resolveSecret(connToValidate.key),
                 environment: connToValidate.environment,
                 companyId: connToValidate.companyId,
                 companyName: connToValidate.companyName,
@@ -161,11 +178,11 @@ router.post("/api/connections/validate", async (req, res) => {
             result = await validateConnection({
                 tenantId: connToValidate.tenantId,
                 clientId: connToValidate.clientId,
-                clientSecret: connToValidate.clientSecret,
-                refreshToken: connToValidate.refreshToken,
+                clientSecret: resolveSecret(connToValidate.clientSecret),
+                refreshToken: resolveSecret(connToValidate.refreshToken),
                 environment: connToValidate.environment || "production",
                 companyId: connToValidate.companyId,
-            });
+            }, { allowInteractive: false });
         }
         res.json(result);
     }
@@ -188,72 +205,87 @@ router.delete("/api/connections/:name", (req, res) => {
     writeConfig(config);
     res.json({ ok: true });
 });
-// ── Device Code Flow (browser-friendly) ──────────────────────────────────────
-// Active device code sessions (keyed by a random session ID)
-const deviceCodeSessions = new Map();
+// ── Authorization Code + PKCE flow (browser popup) ────────────────────────────
+//
+// Replaces the legacy device-code flow. Device code is phishable (an attacker
+// can relay the code to a victim and have them approve the attacker's own
+// session). Authorization Code + PKCE, bound to this dashboard's own TLS
+// origin and validated via `state`, is the Microsoft-recommended flow for
+// apps that can redirect a browser back to themselves.
+//
+// Prerequisite: the app registration needs a "Mobile and desktop applications"
+// platform redirect URI matching exactly
+// `${MCP_PUBLIC_URL}/dashboard/setup/api/auth-code/callback`. NOT "Web" (forces
+// a client secret) and NOT "SPA" (its tokens can only ever be redeemed via
+// browser CORS, which breaks our server's later refresh_token redemption).
+function base64url(input) {
+    return input.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+// Active auth-code sessions, keyed by the PKCE `state` value.
+const authCodeSessions = new Map();
+function callbackRedirectUri() {
+    return `${config.publicUrl}/dashboard/setup/api/auth-code/callback`;
+}
 /**
- * Step 1: Start device code flow — returns user_code + verification_uri.
- * The UI shows these to the user and starts polling step 2.
+ * Step 1: Start the auth-code flow — returns the authorize URL for the
+ * frontend to open in a popup window.
  */
-router.post("/api/device-code/start", async (req, res) => {
+router.post("/api/auth-code/start", (req, res) => {
     const { tenantId, clientId } = req.body;
     if (!tenantId || !clientId) {
         res.status(400).json({ ok: false, error: "tenantId and clientId are required" });
         return;
     }
-    try {
-        const dcRes = await fetch(`https://${TOKEN_HOST}/${tenantId}/oauth2/v2.0/devicecode`, {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: new URLSearchParams({ client_id: clientId, scope: `${BC_SCOPE} offline_access` }),
-        });
-        const dc = await dcRes.json();
-        if (!dc.device_code) {
-            res.json({ ok: false, error: dc.error_description || dc.error || "Device code request failed — check tenantId and clientId." });
-            return;
-        }
-        // Store session for polling
-        const sessionId = crypto.randomUUID();
-        deviceCodeSessions.set(sessionId, {
-            deviceCode: dc.device_code,
-            clientId,
-            tenantId,
-            interval: Math.max(dc.interval || 5, 5),
-            expiresAt: Date.now() + (dc.expires_in || 900) * 1000,
-        });
-        // Auto-cleanup after expiry
-        setTimeout(() => deviceCodeSessions.delete(sessionId), (dc.expires_in || 900) * 1000 + 5000);
-        res.json({
-            ok: true,
-            sessionId,
-            userCode: dc.user_code,
-            verificationUri: dc.verification_uri,
-            message: dc.message,
-            expiresIn: dc.expires_in,
-            interval: Math.max(dc.interval || 5, 5),
-        });
-    }
-    catch (err) {
-        res.json({ ok: false, error: err.message });
-    }
+    const codeVerifier = base64url(randomBytes(32));
+    const codeChallenge = base64url(createHash("sha256").update(codeVerifier).digest());
+    const state = base64url(randomBytes(16));
+    authCodeSessions.set(state, {
+        codeVerifier,
+        clientId,
+        tenantId,
+        expiresAt: Date.now() + 10 * 60 * 1000,
+    });
+    setTimeout(() => authCodeSessions.delete(state), 10 * 60 * 1000 + 5000);
+    const authUrl = new URL(`https://${TOKEN_HOST}/${tenantId}/oauth2/v2.0/authorize`);
+    authUrl.searchParams.set("client_id", clientId);
+    authUrl.searchParams.set("response_type", "code");
+    authUrl.searchParams.set("redirect_uri", callbackRedirectUri());
+    authUrl.searchParams.set("response_mode", "query");
+    authUrl.searchParams.set("scope", `${BC_SCOPE} offline_access`);
+    authUrl.searchParams.set("state", state);
+    authUrl.searchParams.set("code_challenge", codeChallenge);
+    authUrl.searchParams.set("code_challenge_method", "S256");
+    res.json({ ok: true, authUrl: authUrl.toString() });
 });
 /**
- * Step 2: Poll for token — call this repeatedly until it returns a refresh_token or error.
+ * Step 2: Entra redirects the popup here with `code` + `state`. Exchanges the
+ * code for tokens server-side (this redirect URI is registered under the
+ * "Mobile and desktop applications" platform, a public client type that
+ * supports server-side redemption with no secret and no CORS restriction —
+ * unlike SPA-type redirects, whose tokens are permanently browser-only), then
+ * posts the result back to the opener via `postMessage` and closes itself.
  */
-router.post("/api/device-code/poll", async (req, res) => {
-    const { sessionId } = req.body;
-    if (!sessionId) {
-        res.status(400).json({ ok: false, error: "sessionId is required" });
+router.get("/api/auth-code/callback", async (req, res) => {
+    const { code, state, error, error_description } = req.query;
+    const respondHtml = (payload) => {
+        res.type("html").send(`<!DOCTYPE html><html><body>
+<script>
+  if (window.opener) {
+    window.opener.postMessage(${JSON.stringify({ type: "auth-code-callback", ...payload })}, window.location.origin);
+  }
+  window.close();
+</script>
+<p>You can close this window.</p>
+</body></html>`);
+    };
+    if (error || !code || !state) {
+        respondHtml({ ok: false, error: error_description || error || "Missing authorization code" });
         return;
     }
-    const session = deviceCodeSessions.get(sessionId);
-    if (!session) {
-        res.json({ ok: false, error: "Session expired or not found. Start a new device code flow." });
-        return;
-    }
-    if (Date.now() > session.expiresAt) {
-        deviceCodeSessions.delete(sessionId);
-        res.json({ ok: false, error: "Device code expired. Start a new flow." });
+    const session = authCodeSessions.get(state);
+    authCodeSessions.delete(state);
+    if (!session || Date.now() > session.expiresAt) {
+        respondHtml({ ok: false, error: "Sign-in session expired or not found. Please try again." });
         return;
     }
     try {
@@ -262,29 +294,22 @@ router.post("/api/device-code/poll", async (req, res) => {
             headers: { "Content-Type": "application/x-www-form-urlencoded" },
             body: new URLSearchParams({
                 client_id: session.clientId,
-                grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-                device_code: session.deviceCode,
+                grant_type: "authorization_code",
+                code,
+                redirect_uri: callbackRedirectUri(),
+                code_verifier: session.codeVerifier,
+                scope: `${BC_SCOPE} offline_access`,
             }),
         });
         const tok = await tokRes.json();
-        if (tok.refresh_token) {
-            deviceCodeSessions.delete(sessionId);
-            res.json({ ok: true, refreshToken: tok.refresh_token });
+        if (!tok.refresh_token) {
+            respondHtml({ ok: false, error: tok.error_description || tok.error || "Token exchange failed" });
             return;
         }
-        if (tok.error === "authorization_pending") {
-            res.json({ ok: false, pending: true });
-            return;
-        }
-        if (tok.error === "slow_down") {
-            res.json({ ok: false, pending: true, slowDown: true });
-            return;
-        }
-        deviceCodeSessions.delete(sessionId);
-        res.json({ ok: false, error: tok.error_description || tok.error || "Token request failed" });
+        respondHtml({ ok: true, refreshToken: tok.refresh_token });
     }
     catch (err) {
-        res.json({ ok: false, error: err.message });
+        respondHtml({ ok: false, error: err.message });
     }
 });
 // ── HTML page ────────────────────────────────────────────────────────────────
@@ -382,6 +407,7 @@ const SETUP_HTML = `<!DOCTYPE html>
 <div class="nav"><a href="/dashboard">← Back to Dashboard</a></div>
 
 <div class="config-path" id="config-path">Loading…</div>
+<div class="config-path" id="secret-storage">Loading…</div>
 
 <div id="connections"></div>
 
@@ -402,7 +428,7 @@ const SETUP_HTML = `<!DOCTYPE html>
     <div class="form-group"><label>Tenant ID</label><input type="text" id="tenantId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"></div>
     <div class="form-group"><label>Client ID</label><input type="text" id="clientId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"></div>
     <div class="form-group"><label>Client Secret</label><input type="password" id="clientSecret" placeholder="Secret or env:VAR_NAME"><span class="hint">Leave blank if using refresh token</span></div>
-    <div class="form-group"><label>Refresh Token</label><input type="password" id="refreshToken" placeholder="Leave blank if using client secret"><span class="hint">For delegated access (device code flow)</span><button type="button" class="btn-sm" onclick="startDeviceCode()" id="dc-btn" style="margin-top:4px">🔑 Get Refresh Token</button></div>
+    <div class="form-group"><label>Refresh Token</label><input type="password" id="refreshToken" placeholder="Leave blank if using client secret"><span class="hint">For delegated access (browser sign-in)</span><button type="button" class="btn-sm" onclick="startAuthCode()" id="dc-btn" style="margin-top:4px">🔑 Get Refresh Token</button></div>
     <div class="form-group"><label>Environment</label><input type="text" id="saas-env" placeholder="production" value="production"></div>
     <div class="form-group"><label>Company ID</label><input type="text" id="saas-companyId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"><span class="hint">Optional — limits to one company</span></div>
   </div>
@@ -461,6 +487,16 @@ async function loadConnections() {
   const r = await fetch('/dashboard/setup/api/connections');
   const d = await r.json();
   document.getElementById('config-path').textContent = (d.configExists ? '✓ ' : '⚠ No config — ') + d.configPath;
+
+  const storageLabels = {
+    'aes-256-gcm': '✓ Secrets encrypted with AES-256-GCM (MCP_ENCRYPTION_KEY)',
+    'dpapi': '✓ Secrets encrypted with Windows DPAPI (this user account only)',
+    'keychain': '✓ Secrets stored in macOS Keychain',
+    'plaintext': '⚠ No OS secret store available — secrets stored as plain text',
+  };
+  const storageEl = document.getElementById('secret-storage');
+  storageEl.textContent = storageLabels[d.encryption?.method] || '';
+  storageEl.style.color = d.encryption?.method === 'plaintext' ? 'var(--yellow)' : 'var(--dim)';
 
   if (d.basicAuth) {
     document.getElementById('ba-enabled').checked = d.basicAuth.enabled;
@@ -550,7 +586,7 @@ async function saveConn() {
   });
   const d = await r.json();
   if (d.ok) {
-    document.getElementById('form-result').innerHTML = '<div class="result ok">✓ Saved to ' + d.configPath + '</div>';
+    document.getElementById('form-result').innerHTML = '<div class="result ok">✓ Saved to ' + d.configPath + ' (secrets: ' + d.secretStorageMethod + ')</div>';
     loadConnections();
   }
 }
@@ -601,10 +637,30 @@ async function saveBasicAuth() {
   if (d.ok) el.innerHTML = '<div class="result ok" style="margin-top:8px">✓ Saved</div>';
 }
 
-// ── Device Code Flow ──────────────────────────────────────────────────────────
-let dcPollTimer = null;
+// ── Auth Code + PKCE Flow (popup window) ──────────────────────────────────────
+let authCodePopup = null;
 
-async function startDeviceCode() {
+function onAuthCodeMessage(event) {
+  if (event.origin !== window.location.origin) return;
+  const data = event.data;
+  if (!data || data.type !== 'auth-code-callback') return;
+
+  window.removeEventListener('message', onAuthCodeMessage);
+  const statusEl = document.getElementById('dc-status');
+  const modal = document.getElementById('dc-modal');
+
+  if (data.ok && data.refreshToken) {
+    document.getElementById('refreshToken').value = data.refreshToken;
+    statusEl.textContent = '✓ Got refresh token!';
+    statusEl.className = 'status success';
+    setTimeout(() => modal.classList.remove('active'), 1200);
+  } else {
+    statusEl.textContent = data.error || 'Sign-in failed';
+    statusEl.className = 'status error';
+  }
+}
+
+async function startAuthCode() {
   const tenantId = document.getElementById('tenantId').value.trim();
   const clientId = document.getElementById('clientId').value.trim();
   if (!tenantId || !clientId) {
@@ -614,84 +670,41 @@ async function startDeviceCode() {
 
   const modal = document.getElementById('dc-modal');
   const statusEl = document.getElementById('dc-status');
-  const codeEl = document.getElementById('dc-code');
-  const linkEl = document.getElementById('dc-link');
   statusEl.className = 'status';
-  statusEl.textContent = 'Starting…';
-  codeEl.textContent = '…';
+  statusEl.textContent = 'Opening sign-in window…';
   modal.classList.add('active');
 
   try {
-    const r = await fetch('/dashboard/setup/api/device-code/start', {
+    const r = await fetch('/dashboard/setup/api/auth-code/start', {
       method: 'POST', headers: {'Content-Type':'application/json'},
       body: JSON.stringify({ tenantId, clientId })
     });
     const d = await r.json();
     if (!d.ok) { statusEl.textContent = d.error; statusEl.className = 'status error'; return; }
 
-    codeEl.textContent = d.userCode;
-    linkEl.href = d.verificationUri;
-    linkEl.textContent = d.verificationUri;
+    window.addEventListener('message', onAuthCodeMessage);
+    authCodePopup = window.open(d.authUrl, 'origo-bc-signin', 'width=500,height=650');
     statusEl.textContent = 'Waiting for you to sign in…';
-
-    // Open verification URL in new tab
-    window.open(d.verificationUri, '_blank');
-
-    // Start polling
-    const interval = (d.interval || 5) * 1000;
-    dcPollTimer = setInterval(() => pollDeviceCode(d.sessionId, statusEl, modal), interval);
   } catch (e) {
-    statusEl.textContent = e.message;
-    statusEl.className = 'status error';
-  }
-}
-
-async function pollDeviceCode(sessionId, statusEl, modal) {
-  try {
-    const r = await fetch('/dashboard/setup/api/device-code/poll', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ sessionId })
-    });
-    const d = await r.json();
-
-    if (d.ok && d.refreshToken) {
-      clearInterval(dcPollTimer);
-      document.getElementById('refreshToken').value = d.refreshToken;
-      statusEl.textContent = '✓ Got refresh token!';
-      statusEl.className = 'status success';
-      setTimeout(() => modal.classList.remove('active'), 1500);
-      return;
-    }
-    if (d.pending) {
-      statusEl.textContent = 'Waiting for you to sign in…';
-      return;
-    }
-    // Error
-    clearInterval(dcPollTimer);
-    statusEl.textContent = d.error || 'Failed';
-    statusEl.className = 'status error';
-  } catch (e) {
-    clearInterval(dcPollTimer);
     statusEl.textContent = e.message;
     statusEl.className = 'status error';
   }
 }
 
 function closeDcModal() {
-  clearInterval(dcPollTimer);
+  window.removeEventListener('message', onAuthCodeMessage);
+  if (authCodePopup && !authCodePopup.closed) authCodePopup.close();
   document.getElementById('dc-modal').classList.remove('active');
 }
 
 loadConnections();
 </script>
 
-<!-- Device Code Modal -->
+<!-- Auth Code Sign-In Modal -->
 <div class="modal-overlay" id="dc-modal">
   <div class="modal">
-    <h3>🔑 Device Code Sign-In</h3>
-    <p class="hint">Enter this code at the Microsoft sign-in page:</p>
-    <div class="user-code" id="dc-code">…</div>
-    <p class="hint"><a id="dc-link" href="#" target="_blank" style="color:var(--blue)">https://microsoft.com/devicelogin</a></p>
+    <h3>🔑 Browser Sign-In</h3>
+    <p class="hint">Complete sign-in in the popup window.</p>
     <p class="status" id="dc-status">Starting…</p>
     <button class="btn" onclick="closeDcModal()" style="margin-top:16px">Cancel</button>
   </div>

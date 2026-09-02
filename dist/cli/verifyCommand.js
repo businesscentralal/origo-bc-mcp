@@ -1,6 +1,6 @@
 /**
  * Standalone connection verification command.
- * Validates one or all configured connections, with device-code re-auth for expired tokens.
+ * Validates one or all configured connections, with interactive browser re-auth for expired tokens.
  *
  * Usage:
  *   origo-bc-mcp-server verify             — verify all connections
@@ -86,7 +86,7 @@ export async function runVerify(name) {
         const resolved = resolveConnSecrets(target.raw);
         let result;
         try {
-            result = await validateConnection(resolved, { allowDeviceCode: true });
+            result = await validateConnection(resolved, { allowInteractive: true });
         }
         catch (e) {
             console.log(`✗ ${e instanceof Error ? e.message : String(e)}`);

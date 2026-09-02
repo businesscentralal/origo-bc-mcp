@@ -70,6 +70,33 @@ function unwrapDpapi(b64) {
     }
     return plain;
 }
+/**
+ * Encrypts a value with Windows DPAPI (CurrentUser scope) and returns it as a
+ * "dpapi:<base64>" string. Only decryptable by the same Windows user account
+ * on the same machine.
+ */
+export function wrapDpapi(plainText) {
+    if (process.platform !== "win32") {
+        throw new Error("DPAPI is only available on Windows.");
+    }
+    const script = "$ErrorActionPreference = 'Stop';" +
+        "Add-Type -AssemblyName System.Security | Out-Null;" +
+        "$stdin = [Console]::In.ReadToEnd();" +
+        "$plainBytes = [System.Text.Encoding]::UTF8.GetBytes($stdin);" +
+        "try {" +
+        "$cipher = [System.Security.Cryptography.ProtectedData]::Protect(" +
+        "$plainBytes, $null, " +
+        "[System.Security.Cryptography.DataProtectionScope]::CurrentUser)" +
+        "} finally {" +
+        "for ($i = 0; $i -lt $plainBytes.Length; $i++) { $plainBytes[$i] = 0 }" +
+        "}" +
+        "[Console]::Out.Write([Convert]::ToBase64String($cipher))";
+    const result = spawnSync("powershell.exe", ["-NoProfile", "-NonInteractive", "-ExecutionPolicy", "Bypass", "-Command", script], { input: plainText, encoding: "utf8", windowsHide: true });
+    if (result.status !== 0) {
+        throw new Error(`DPAPI wrap failed (exit ${result.status})`);
+    }
+    return "dpapi:" + (result.stdout ?? "").toString().trim();
+}
 // ── macOS Keychain ────────────────────────────────────────────────────────────
 function readKeychain(service) {
     if (process.platform !== "darwin") {
@@ -88,6 +115,26 @@ function readKeychain(service) {
         throw new Error(`Keychain returned empty value for service "${service}".`);
     }
     return value;
+}
+/**
+ * Stores a value in the macOS login Keychain under `service` and returns a
+ * "keychain:<service>" reference. Overwrites any existing entry for that service.
+ */
+export function writeKeychain(service, plainText) {
+    if (process.platform !== "darwin") {
+        throw new Error("Keychain is only available on macOS.");
+    }
+    const account = "mcp-encrypted-conn";
+    // Delete any existing entry first (ignore errors if it doesn't exist).
+    spawnSync("security", ["delete-generic-password", "-a", account, "-s", service], {
+        encoding: "utf8",
+    });
+    const result = spawnSync("security", ["add-generic-password", "-a", account, "-s", service, "-w", plainText, "-U"], { encoding: "utf8" });
+    if (result.status !== 0) {
+        const msg = (result.stderr ?? "").trim() || `security exited with ${result.status}`;
+        throw new Error(`Keychain write failed: ${msg}`);
+    }
+    return `keychain:${service}`;
 }
 // ── AES-256-GCM (cross-platform, uses MCP_ENCRYPTION_KEY) ────────────────────
 function getEncryptionKeyBuffer() {

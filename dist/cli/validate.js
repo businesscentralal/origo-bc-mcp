@@ -1,5 +1,5 @@
 /**
- * Connection validation and device-code refresh token acquisition.
+ * Connection validation and refresh token acquisition.
  *
  * Used by the setup wizard and the standalone `origo-bc-mcp-server verify` command
  * to confirm that a connection's credentials can actually reach BC.
@@ -7,13 +7,16 @@
  * For SaaS connections:
  *   - Client-secret flow: acquires a token via client_credentials grant.
  *   - Refresh-token flow: acquires a token via refresh_token grant.
- *     If the refresh token is expired/revoked, triggers device-code flow to obtain a new one.
+ *     If the refresh token is expired/revoked, triggers an interactive browser
+ *     sign-in (Authorization Code + PKCE, loopback redirect) to obtain a new one.
  *
  * For On-prem connections:
  *   - Sends a Basic-auth request to the BC base URL's /api/v2.0/companies endpoint.
  */
 import { spawnSync } from "node:child_process";
 import { platform } from "node:os";
+import { createServer } from "node:http";
+import { randomBytes, createHash } from "node:crypto";
 const BC_API_HOST = "api.businesscentral.dynamics.com";
 const TOKEN_HOST = "login.microsoftonline.com";
 const BC_SCOPE = "https://api.businesscentral.dynamics.com/.default";
@@ -47,56 +50,100 @@ async function acquireToken(conn) {
     }
     throw new Error(`${parsed.error ?? "no_token"}: ${parsed.error_description ?? "Unknown error"}`);
 }
-export async function deviceCodeFlow(tenantId, clientId) {
-    const deviceCodeUrl = `https://${TOKEN_HOST}/${tenantId}/oauth2/v2.0/devicecode`;
-    const tokenUrl = `https://${TOKEN_HOST}/${tenantId}/oauth2/v2.0/token`;
+// ── Authorization Code + PKCE flow (loopback redirect) ────────────────────────
+//
+// Replaces the legacy device-code flow. Device code is phishable (an attacker
+// can relay a device code to a victim and have them approve the attacker's
+// session) and was designed for input-constrained devices, not developer
+// workstations. Authorization Code + PKCE with a loopback redirect is the
+// Microsoft-recommended flow for native/CLI apps that can open a local browser.
+//
+// Prerequisite: the app registration must have a "Mobile and desktop
+// applications" platform redirect URI of exactly `http://localhost` (Entra
+// matches loopback redirect URIs on any port when registered this way).
+function base64url(input) {
+    return input.toString("base64").replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+}
+export async function authCodeFlow(tenantId, clientId) {
     const scope = `${BC_SCOPE} offline_access`;
-    // Step 1: Request a device code.
-    const dcRes = await fetch(deviceCodeUrl, {
+    const codeVerifier = base64url(randomBytes(32));
+    const codeChallenge = base64url(createHash("sha256").update(codeVerifier).digest());
+    const state = base64url(randomBytes(16));
+    let redirectUri = "";
+    const code = await new Promise((resolvePromise, rejectPromise) => {
+        let settled = false;
+        const finish = (fn) => {
+            if (settled)
+                return;
+            settled = true;
+            clearTimeout(timeoutHandle);
+            server.close();
+            fn();
+        };
+        const server = createServer((req, res) => {
+            const url = new URL(req.url ?? "/", "http://127.0.0.1");
+            if (url.pathname !== "/callback") {
+                res.writeHead(404).end();
+                return;
+            }
+            const returnedState = url.searchParams.get("state");
+            const authCode = url.searchParams.get("code");
+            const error = url.searchParams.get("error");
+            if (error || !authCode || returnedState !== state) {
+                res.writeHead(200, { "Content-Type": "text/html" });
+                res.end("<html><body><h3>Sign-in failed. You can close this window.</h3></body></html>");
+                finish(() => rejectPromise(new Error(url.searchParams.get("error_description") ?? error ?? "Invalid or missing authorization code")));
+                return;
+            }
+            res.writeHead(200, { "Content-Type": "text/html" });
+            res.end("<html><body><h3>Signed in — you can close this window.</h3></body></html>");
+            finish(() => resolvePromise(authCode));
+        });
+        const timeoutHandle = setTimeout(() => {
+            finish(() => rejectPromise(new Error("Sign-in timed out. Please try again.")));
+        }, 5 * 60 * 1000);
+        server.on("error", (err) => finish(() => rejectPromise(err)));
+        server.listen(0, "127.0.0.1", () => {
+            const address = server.address();
+            const port = typeof address === "object" && address ? address.port : 0;
+            redirectUri = `http://127.0.0.1:${port}/callback`;
+            const authUrl = new URL(`https://${TOKEN_HOST}/${tenantId}/oauth2/v2.0/authorize`);
+            authUrl.searchParams.set("client_id", clientId);
+            authUrl.searchParams.set("response_type", "code");
+            authUrl.searchParams.set("redirect_uri", redirectUri);
+            authUrl.searchParams.set("response_mode", "query");
+            authUrl.searchParams.set("scope", scope);
+            authUrl.searchParams.set("state", state);
+            authUrl.searchParams.set("code_challenge", codeChallenge);
+            authUrl.searchParams.set("code_challenge_method", "S256");
+            console.log(`\n  ── Browser Sign-In (Authorization Code + PKCE) ──`);
+            console.log("  Opening your browser to complete sign-in...");
+            console.log(`  If it doesn't open automatically, visit:\n  ${authUrl.toString()}\n`);
+            try {
+                const opener = platform() === "win32" ? "start" : platform() === "darwin" ? "open" : "xdg-open";
+                spawnSync(opener, [authUrl.toString()], { shell: true, windowsHide: true });
+            }
+            catch { /* non-fatal */ }
+        });
+    });
+    const tokRes = await fetch(`https://${TOKEN_HOST}/${tenantId}/oauth2/v2.0/token`, {
         method: "POST",
         headers: { "Content-Type": "application/x-www-form-urlencoded" },
-        body: new URLSearchParams({ client_id: clientId, scope }),
+        body: new URLSearchParams({
+            client_id: clientId,
+            grant_type: "authorization_code",
+            code,
+            redirect_uri: redirectUri,
+            code_verifier: codeVerifier,
+            scope,
+        }),
     });
-    const dc = (await dcRes.json());
-    if (!dc.device_code) {
-        throw new Error("Device code request failed — check tenantId and clientId.");
+    const tok = (await tokRes.json());
+    if (!tok.refresh_token) {
+        throw new Error(`Authorization code exchange failed: ${tok.error_description ?? tok.error}`);
     }
-    console.log(`\n  ── Device Code Authentication ──`);
-    console.log(`  ${dc.message}\n`);
-    // Try to open the browser.
-    try {
-        const opener = platform() === "win32" ? "start" : platform() === "darwin" ? "open" : "xdg-open";
-        spawnSync(opener, [dc.verification_uri], { shell: true, windowsHide: true });
-    }
-    catch { /* non-fatal */ }
-    // Step 2: Poll for token.
-    let interval = Math.max(dc.interval || 5, 5) * 1000;
-    const deadline = Date.now() + dc.expires_in * 1000;
-    while (Date.now() < deadline) {
-        await new Promise((r) => setTimeout(r, interval));
-        const tokRes = await fetch(tokenUrl, {
-            method: "POST",
-            headers: { "Content-Type": "application/x-www-form-urlencoded" },
-            body: new URLSearchParams({
-                client_id: clientId,
-                grant_type: "urn:ietf:params:oauth:grant-type:device_code",
-                device_code: dc.device_code,
-            }),
-        });
-        const tok = (await tokRes.json());
-        if (tok.refresh_token) {
-            console.log("  ✓ Authentication successful.\n");
-            return tok.refresh_token;
-        }
-        if (tok.error === "authorization_pending")
-            continue;
-        if (tok.error === "slow_down") {
-            interval += 5000;
-            continue;
-        }
-        throw new Error(`Device code flow failed: ${tok.error_description ?? tok.error}`);
-    }
-    throw new Error("Device code flow timed out. Please try again.");
+    console.log("  ✓ Authentication successful.\n");
+    return tok.refresh_token;
 }
 // ── Validate a connection end-to-end ─────────────────────────────────────────
 export async function validateConnection(conn, opts) {
@@ -115,8 +162,8 @@ export async function validateConnection(conn, opts) {
     }
     catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        // If refresh token expired/revoked and device code is allowed, offer re-auth.
-        if (saas.refreshToken && opts?.allowDeviceCode) {
+        // If refresh token expired/revoked and interactive re-auth is allowed, offer it.
+        if (saas.refreshToken && opts?.allowInteractive) {
             const isExpired = msg.includes("AADSTS700082") || // expired
                 msg.includes("AADSTS70000") || // revoked/invalid grant
                 msg.includes("AADSTS50173") || // fresh credentials needed
@@ -124,9 +171,9 @@ export async function validateConnection(conn, opts) {
                 msg.includes("invalid_grant");
             if (isExpired) {
                 console.log(`\n  ⚠ Refresh token is invalid or expired: ${msg}`);
-                console.log("  Starting device-code flow to obtain a new token...\n");
+                console.log("  Starting browser sign-in to obtain a new token...\n");
                 try {
-                    const freshToken = await deviceCodeFlow(saas.tenantId, saas.clientId);
+                    const freshToken = await authCodeFlow(saas.tenantId, saas.clientId);
                     // Retry with new token.
                     saas.refreshToken = freshToken;
                     const retryResult = await acquireToken(saas);

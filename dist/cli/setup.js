@@ -10,7 +10,7 @@ import { join, resolve, dirname } from "node:path";
 import { homedir, platform } from "node:os";
 import { createInterface } from "node:readline";
 import { spawnSync } from "node:child_process";
-import { validateConnection, deviceCodeFlow } from "./validate.js";
+import { validateConnection, authCodeFlow } from "./validate.js";
 import { resolveSecret } from "../config/resolveSecret.js";
 // ── Paths ────────────────────────────────────────────────────────────────────
 function getVSCodeMcpPath() {
@@ -82,7 +82,7 @@ function readMcpConfig(path) {
 // ── Connection validation ────────────────────────────────────────────────────
 /**
  * Resolves secret references in a connection object (working copy) and validates.
- * If a refresh token is expired, triggers device-code flow with user consent.
+ * If a refresh token is expired, triggers an interactive browser sign-in.
  * Returns the validation result (may contain a newRefreshToken to persist).
  */
 async function validateAndUpdate(connection, connName) {
@@ -98,7 +98,7 @@ async function validateAndUpdate(connection, connName) {
         resolved.refreshToken = resolveSecret(resolved.refreshToken);
     if (typeof resolved.key === "string")
         resolved.key = resolveSecret(resolved.key);
-    const result = await validateConnection(resolved, { allowDeviceCode: true });
+    const result = await validateConnection(resolved, { allowInteractive: true });
     if (result.ok) {
         const count = result.companies?.length ?? 0;
         console.log(`  ✓ Connection valid — ${count} ${count === 1 ? "company" : "companies"} accessible.`);
@@ -198,7 +198,7 @@ async function askSecretStorage(label, defaultEnvVar, keychainService) {
 }
 /**
  * Wraps an already-known secret value using platform-appropriate storage.
- * Used when the setup flow already has the value (e.g. device-code refresh token).
+ * Used when the setup flow already has the value (e.g. a freshly signed-in refresh token).
  */
 async function wrapKnownSecret(label, value, defaultEnvVar, keychainService) {
     const choices = ["Environment variable reference (recommended)"];
@@ -394,7 +394,7 @@ export async function runSetup() {
         const clientId = await ask("App registration client ID (GUID)");
         const authFlow = await askChoice("Authentication flow:", [
             "Client secret",
-            "Device code (refresh token)",
+            "Browser sign-in (refresh token)",
             "Environment variable (env:VAR_NAME)",
         ], 0);
         let clientSecret;
@@ -402,9 +402,9 @@ export async function runSetup() {
         if (authFlow.startsWith("Client secret")) {
             clientSecret = await askSecretStorage("client secret", "BC_DEV_CLIENT_SECRET", `origo-bc-mcp-${connName}-secret`);
         }
-        else if (authFlow.startsWith("Device code")) {
-            console.log("\n  Starting device code authentication...");
-            const rawToken = await deviceCodeFlow(tenantId, clientId);
+        else if (authFlow.startsWith("Browser sign-in")) {
+            console.log("\n  Starting browser sign-in...");
+            const rawToken = await authCodeFlow(tenantId, clientId);
             refreshToken = await wrapKnownSecret("refresh token", rawToken, "BC_DEV_REFRESH_TOKEN", `origo-bc-mcp-${connName}-token`);
         }
         else {
@@ -540,7 +540,7 @@ export async function runAdd(name) {
         const clientId = await ask("App registration client ID (GUID)");
         const authFlow = await askChoice("Authentication flow:", [
             "Client secret",
-            "Device code (refresh token)",
+            "Browser sign-in (refresh token)",
             "Environment variable (env:VAR_NAME)",
         ], 0);
         let clientSecret;
@@ -548,9 +548,9 @@ export async function runAdd(name) {
         if (authFlow.startsWith("Client secret")) {
             clientSecret = await askSecretStorage("client secret", "BC_DEV_CLIENT_SECRET", `origo-bc-mcp-${connName}-secret`);
         }
-        else if (authFlow.startsWith("Device code")) {
-            console.log("\n  Starting device code authentication...");
-            const rawToken = await deviceCodeFlow(tenantId, clientId);
+        else if (authFlow.startsWith("Browser sign-in")) {
+            console.log("\n  Starting browser sign-in...");
+            const rawToken = await authCodeFlow(tenantId, clientId);
             refreshToken = await wrapKnownSecret("refresh token", rawToken, "BC_DEV_REFRESH_TOKEN", `origo-bc-mcp-${connName}-token`);
         }
         else {
@@ -581,7 +581,7 @@ export async function runAdd(name) {
         if (companyName)
             connection.companyName = companyName;
     }
-    // Validate (skip if device code already validated)
+    // Validate (skip if browser sign-in already validated)
     const alreadyValidated = !!connection.refreshToken;
     if (!alreadyValidated) {
         await validateAndUpdate(connection, connName);
