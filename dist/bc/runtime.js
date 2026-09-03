@@ -12,6 +12,9 @@ const FETCH_ALL_BATCH_SIZE = 1000;
 /** Hard cap on total records returned by fetchAllPages to prevent OOM on large tables. */
 const FETCH_ALL_MAX_RECORDS = 10_000;
 const MCP_SOURCE = "Origo-BC Cloud Events MCP";
+const CUSTOM_API_GROUP = "bifrost";
+const LEGACY_CUSTOM_API_GROUP_SAAS = "cloudEvent";
+const LEGACY_CUSTOM_API_GROUP_ON_PREM = "cloudevent";
 function dbg(...args) {
     if (config.debug)
         console.log("[BC]", ...args);
@@ -28,6 +31,39 @@ async function bcFetch(url, init, retries = 3) {
         return res;
     }
     throw new Error(`BC fetch failed after ${retries} retries`);
+}
+function buildCustomApiRoutes(tenantId, environment, companyId, resource) {
+    const ctx = getAuthContext();
+    const legacyGroup = ctx.conn.onPrem ? LEGACY_CUSTOM_API_GROUP_ON_PREM : LEGACY_CUSTOM_API_GROUP_SAAS;
+    const groups = [CUSTOM_API_GROUP, legacyGroup];
+    if (ctx.conn.onPrem) {
+        const base = ctx.conn.baseUrl.replace(/\/$/, "");
+        const tenant = ctx.conn.onPremTenant ?? "default";
+        return groups.map((group) => ({
+            group,
+            basePath: `${base}/api/origo/${group}/v1.0/companies(${companyId})/${resource}`,
+            querySuffix: `?tenant=${encodeURIComponent(tenant)}`,
+        }));
+    }
+    return groups.map((group) => ({
+        group,
+        basePath: `https://${BC_HOST}/v2.0/${tenantId}/${environment}/api/origo/${group}/v1.0/companies(${companyId})/${resource}`,
+        querySuffix: "",
+    }));
+}
+async function bcFetchCustomApi(routes, urlSuffix, init) {
+    for (let i = 0; i < routes.length; i++) {
+        const route = routes[i];
+        const url = `${route.basePath}${urlSuffix}${route.querySuffix}`;
+        const res = await bcFetch(url, init);
+        if (res.status === 404 && i < routes.length - 1) {
+            await res.text();
+            dbg(`  ${route.group} endpoint not found; retrying legacy endpoint`);
+            continue;
+        }
+        return { res, route, url };
+    }
+    throw new Error("No custom API routes configured.");
 }
 // ── Company resolution ──────────────────────────────────────────────────────
 const companiesCache = new Map();
@@ -92,25 +128,23 @@ export async function resolveTarget(overrides) {
 export async function bcTask(tenantId, environment, companyId, envelope) {
     const ctx = getAuthContext();
     let auth;
-    let taskUrl;
+    let routes;
     if (ctx.conn.onPrem) {
         auth = onPremAuthHeader(ctx.conn);
-        const base = ctx.conn.baseUrl.replace(/\/$/, "");
-        const tenant = ctx.conn.onPremTenant ?? "default";
-        taskUrl = `${base}/api/origo/cloudevent/v1.0/companies(${companyId})/tasks?tenant=${encodeURIComponent(tenant)}`;
+        routes = buildCustomApiRoutes(tenantId, environment, companyId, "tasks");
     }
     else {
         const token = await getBcAccessToken(tenantId);
         auth = `Bearer ${token}`;
-        taskUrl = `https://${BC_HOST}/v2.0/${tenantId}/${environment}/api/origo/cloudEvent/v1.0/companies(${companyId})/tasks`;
+        routes = buildCustomApiRoutes(tenantId, environment, companyId, "tasks");
     }
-    dbg(`POST ${taskUrl}`);
     dbg(`  type=${envelope.type} subject=${envelope.subject || ""}`);
-    const res = await bcFetch(taskUrl, {
+    const { res, url: taskUrl } = await bcFetchCustomApi(routes, "", {
         method: "POST",
         headers: { Authorization: auth, "Content-Type": "application/json" },
         body: JSON.stringify(envelope),
     });
+    dbg(`POST ${taskUrl}`);
     const task = (await res.json());
     dbg(`  status=${task.status}${task.data ? " (has data URL)" : ""}`);
     if (task.status === "Error") {
@@ -187,25 +221,23 @@ export async function bcTask(tenantId, environment, companyId, envelope) {
 export async function bcQueuePost(tenantId, environment, companyId, envelope) {
     const ctx = getAuthContext();
     let auth;
-    let queueUrl;
+    let routes;
     if (ctx.conn.onPrem) {
         auth = onPremAuthHeader(ctx.conn);
-        const base = ctx.conn.baseUrl.replace(/\/$/, "");
-        const tenant = ctx.conn.onPremTenant ?? "default";
-        queueUrl = `${base}/api/origo/cloudevent/v1.0/companies(${companyId})/queues?tenant=${encodeURIComponent(tenant)}`;
+        routes = buildCustomApiRoutes(tenantId, environment, companyId, "queues");
     }
     else {
         const token = await getBcAccessToken(tenantId);
         auth = `Bearer ${token}`;
-        queueUrl = `https://${BC_HOST}/v2.0/${tenantId}/${environment}/api/origo/cloudEvent/v1.0/companies(${companyId})/queues`;
+        routes = buildCustomApiRoutes(tenantId, environment, companyId, "queues");
     }
-    dbg(`POST ${queueUrl}`);
     dbg(`  type=${envelope.type} subject=${envelope.subject || ""}`);
-    const res = await bcFetch(queueUrl, {
+    const { res, url: queueUrl } = await bcFetchCustomApi(routes, "", {
         method: "POST",
         headers: { Authorization: auth, "Content-Type": "application/json" },
         body: JSON.stringify(envelope),
     });
+    dbg(`POST ${queueUrl}`);
     const text = await res.text();
     if (!text.trim())
         return { statusCode: res.status };
@@ -219,19 +251,15 @@ export async function bcQueuePost(tenantId, environment, companyId, envelope) {
 async function resolveQueueAuth(tenantId, environment, companyId) {
     const ctx = getAuthContext();
     if (ctx.conn.onPrem) {
-        const base = ctx.conn.baseUrl.replace(/\/$/, "");
-        const tenant = ctx.conn.onPremTenant ?? "default";
         return {
             auth: onPremAuthHeader(ctx.conn),
-            basePath: `${base}/api/origo/cloudevent/v1.0/companies(${companyId})/queues`,
-            querySuffix: `?tenant=${encodeURIComponent(tenant)}`,
+            routes: buildCustomApiRoutes(tenantId, environment, companyId, "queues"),
         };
     }
     const token = await getBcAccessToken(tenantId);
     return {
         auth: `Bearer ${token}`,
-        basePath: `https://${BC_HOST}/v2.0/${tenantId}/${environment}/api/origo/cloudEvent/v1.0/companies(${companyId})/queues`,
-        querySuffix: "",
+        routes: buildCustomApiRoutes(tenantId, environment, companyId, "queues"),
     };
 }
 function mapQueueStatus(statusCode, raw, bcResponse) {
@@ -255,21 +283,20 @@ function mapQueueStatus(statusCode, raw, bcResponse) {
     return { status: "unknown", message: `Unexpected queue status response (HTTP ${statusCode})` };
 }
 export async function bcQueueStatus(tenantId, environment, companyId, queueId) {
-    const { auth, basePath, querySuffix } = await resolveQueueAuth(tenantId, environment, companyId);
-    const statusUrl = `${basePath}(${queueId})/Microsoft.NAV.GetStatus${querySuffix}`;
-    dbg(`POST ${statusUrl}`);
-    const res = await bcFetch(statusUrl, {
+    const { auth, routes } = await resolveQueueAuth(tenantId, environment, companyId);
+    const { res, route, url: statusUrl } = await bcFetchCustomApi(routes, `(${queueId})/Microsoft.NAV.GetStatus`, {
         method: "POST",
         headers: { Authorization: auth, "Content-Type": "application/json" },
         body: JSON.stringify({}),
     });
+    dbg(`POST ${statusUrl}`);
     const raw = await res.text();
     let bcResponse;
     if (res.status === 200) {
         const locationUrl = res.headers.get("location") ?? res.headers.get("Location");
         if (locationUrl) {
             // Read the queue entity to get datacontenttype (the /data download reports octet-stream)
-            const entityUrl = `${basePath}(${queueId})${querySuffix}`;
+            const entityUrl = `${route.basePath}(${queueId})${route.querySuffix}`;
             const entityRes = await bcFetch(entityUrl, { method: "GET", headers: { Authorization: auth } });
             const entityRaw = await entityRes.text();
             let datacontenttype = "";
@@ -286,9 +313,7 @@ export async function bcQueueStatus(tenantId, environment, companyId, queueId) {
             if (ctx2.conn.onPrem) {
                 const m = locationUrl.match(/\/responses\(([^)]+)\)/i);
                 const responsesId = m ? m[1] : queueId;
-                const onPremBase = ctx2.conn.baseUrl.replace(/\/$/, "");
-                const tenant = ctx2.conn.onPremTenant ?? "default";
-                dataUrl = `${onPremBase}/api/origo/cloudevent/v1.0/companies(${companyId})/responses(${responsesId})/data?tenant=${encodeURIComponent(tenant)}`;
+                dataUrl = `${route.basePath.replace(/\/queues$/, "/responses")}(${responsesId})/data${route.querySuffix}`;
             }
             else {
                 try {
@@ -329,14 +354,13 @@ export async function bcQueueStatus(tenantId, environment, companyId, queueId) {
     };
 }
 export async function bcQueueRetry(tenantId, environment, companyId, queueId) {
-    const { auth, basePath, querySuffix } = await resolveQueueAuth(tenantId, environment, companyId);
-    const retryUrl = `${basePath}(${queueId})/Microsoft.NAV.RetryTask${querySuffix}`;
-    dbg(`POST ${retryUrl}`);
-    const res = await bcFetch(retryUrl, {
+    const { auth, routes } = await resolveQueueAuth(tenantId, environment, companyId);
+    const { res, url: retryUrl } = await bcFetchCustomApi(routes, `(${queueId})/Microsoft.NAV.RetryTask`, {
         method: "POST",
         headers: { Authorization: auth, "Content-Type": "application/json" },
         body: JSON.stringify({}),
     });
+    dbg(`POST ${retryUrl}`);
     const raw = await res.text();
     const status = res.status === 200 ? "retried" : res.status === 204 ? "none" : "error";
     const message = res.status === 200 ? "Queue task retry initiated" :
@@ -345,14 +369,13 @@ export async function bcQueueRetry(tenantId, environment, companyId, queueId) {
     return { statusCode: res.status, status, message, ...(raw ? { _raw: raw } : {}) };
 }
 export async function bcQueueCancel(tenantId, environment, companyId, queueId) {
-    const { auth, basePath, querySuffix } = await resolveQueueAuth(tenantId, environment, companyId);
-    const cancelUrl = `${basePath}(${queueId})/Microsoft.NAV.CancelTask${querySuffix}`;
-    dbg(`POST ${cancelUrl}`);
-    const res = await bcFetch(cancelUrl, {
+    const { auth, routes } = await resolveQueueAuth(tenantId, environment, companyId);
+    const { res, url: cancelUrl } = await bcFetchCustomApi(routes, `(${queueId})/Microsoft.NAV.CancelTask`, {
         method: "POST",
         headers: { Authorization: auth, "Content-Type": "application/json" },
         body: JSON.stringify({}),
     });
+    dbg(`POST ${cancelUrl}`);
     const raw = await res.text();
     const status = res.status === 200 ? "cancelled" : res.status === 204 ? "none" : "error";
     const message = res.status === 200 ? "Queue task cancelled" :
