@@ -4,7 +4,7 @@
  */
 import { z } from "zod";
 import { json } from "../bc/runtime.js";
-const SKILL_URL = "https://origopublic.blob.core.windows.net/help/Cloud%20Events/bc27/en-US/SKILL.md";
+const SKILL_URL = "https://raw.githubusercontent.com/businesscentralal/bifrost/main/static/skills/bifrost-bc-integration/SKILL.md";
 const CACHE_TTL_MS = 5 * 60 * 1000; // 5 minutes
 let cached = null;
 async function fetchSkill() {
