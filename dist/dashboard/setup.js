@@ -12,6 +12,7 @@ import { Router } from "express";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
 import { resolve, dirname } from "node:path";
 import { randomBytes, createHash } from "node:crypto";
+import { spawn } from "node:child_process";
 import { validateConnection } from "../cli/validate.js";
 import { encryptSecret, canEncryptSecrets, wrapDpapi, writeKeychain, resolveSecret } from "../config/resolveSecret.js";
 import { invalidateSettingsCache } from "../config/localSettings.js";
@@ -223,6 +224,10 @@ function base64url(input) {
 }
 // Active auth-code sessions, keyed by the PKCE `state` value.
 const authCodeSessions = new Map();
+// Completed auth-code results, keyed by `state`, for the polling fallback used
+// when the sign-in window was spawned as a detached OS process (in-private
+// mode) rather than a JS popup, so there's no `window.opener` to message back.
+const authCodeResults = new Map();
 function callbackRedirectUri() {
     return `${config.publicUrl}/dashboard/setup/api/auth-code/callback`;
 }
@@ -255,19 +260,104 @@ router.post("/api/auth-code/start", (req, res) => {
     authUrl.searchParams.set("state", state);
     authUrl.searchParams.set("code_challenge", codeChallenge);
     authUrl.searchParams.set("code_challenge_method", "S256");
-    res.json({ ok: true, authUrl: authUrl.toString() });
+    res.json({ ok: true, authUrl: authUrl.toString(), state });
 });
 /**
- * Step 2: Entra redirects the popup here with `code` + `state`. Exchanges the
- * code for tokens server-side (this redirect URI is registered under the
- * "Mobile and desktop applications" platform, a public client type that
- * supports server-side redemption with no secret and no CORS restriction —
- * unlike SPA-type redirects, whose tokens are permanently browser-only), then
- * posts the result back to the opener via `postMessage` and closes itself.
+ * Attempts to spawn a known browser in private/incognito mode pointed at
+ * `url`. Tries candidates in order and stops at the first one that spawns
+ * without an ENOENT error. Since the server and browser normally run on the
+ * same machine (local dev dashboard), this launches a real OS process rather
+ * than a JS `window.open` popup, which cannot force private mode.
+ */
+function trySpawn(cmd, args) {
+    return new Promise((resolvePromise) => {
+        let settled = false;
+        try {
+            const child = spawn(cmd, args, {
+                stdio: "ignore",
+                detached: true,
+                shell: process.platform === "win32",
+            });
+            child.once("error", () => {
+                if (!settled) {
+                    settled = true;
+                    resolvePromise(false);
+                }
+            });
+            child.unref();
+            setTimeout(() => {
+                if (!settled) {
+                    settled = true;
+                    resolvePromise(true);
+                }
+            }, 400);
+        }
+        catch {
+            resolvePromise(false);
+        }
+    });
+}
+async function openPrivateBrowser(url) {
+    const candidates = process.platform === "win32"
+        ? [
+            { cmd: "cmd", args: ["/c", "start", "", "msedge", "--inprivate", url] },
+            { cmd: "cmd", args: ["/c", "start", "", "chrome", "--incognito", url] },
+            { cmd: "cmd", args: ["/c", "start", "", "firefox", "-private-window", url] },
+        ]
+        : process.platform === "darwin"
+            ? [
+                { cmd: "open", args: ["-na", "Microsoft Edge", "--args", "--inprivate", url] },
+                { cmd: "open", args: ["-na", "Google Chrome", "--args", "--incognito", url] },
+                { cmd: "open", args: ["-na", "Firefox", "--args", "-private-window", url] },
+            ]
+            : [
+                { cmd: "microsoft-edge", args: ["--inprivate", url] },
+                { cmd: "google-chrome", args: ["--incognito", url] },
+                { cmd: "chromium", args: ["--incognito", url] },
+                { cmd: "firefox", args: ["-private-window", url] },
+            ];
+    for (const candidate of candidates) {
+        if (await trySpawn(candidate.cmd, candidate.args))
+            return true;
+    }
+    return false;
+}
+/**
+ * Launches the sign-in URL in an in-private/incognito browser window on the
+ * machine running the dashboard server. Falls back to a regular popup
+ * client-side if this fails (e.g. remote dashboard, no known browser found).
+ */
+router.post("/api/auth-code/open-private", async (req, res) => {
+    const { url } = req.body;
+    if (!url) {
+        res.status(400).json({ ok: false, error: "url is required" });
+        return;
+    }
+    try {
+        const opened = await openPrivateBrowser(url);
+        res.json({ ok: opened });
+    }
+    catch (err) {
+        res.json({ ok: false, error: err.message });
+    }
+});
+/**
+ * Step 2: Entra redirects the sign-in window here with `code` + `state`.
+ * Exchanges the code for tokens server-side (this redirect URI is registered
+ * under the "Mobile and desktop applications" platform, a public client type
+ * that supports server-side redemption with no secret and no CORS restriction
+ * — unlike SPA-type redirects, whose tokens are permanently browser-only).
+ * Results are both posted back via `postMessage` (popup fallback path) and
+ * stashed in `authCodeResults` keyed by `state` (in-private path, where the
+ * spawned window has no `window.opener` to message back to) for polling.
  */
 router.get("/api/auth-code/callback", async (req, res) => {
     const { code, state, error, error_description } = req.query;
     const respondHtml = (payload) => {
+        if (state) {
+            authCodeResults.set(state, payload);
+            setTimeout(() => authCodeResults.delete(state), 5 * 60 * 1000);
+        }
         res.type("html").send(`<!DOCTYPE html><html><body>
 <script>
   if (window.opener) {
@@ -311,6 +401,25 @@ router.get("/api/auth-code/callback", async (req, res) => {
     catch (err) {
         respondHtml({ ok: false, error: err.message });
     }
+});
+/**
+ * Step 3 (in-private path only): the dashboard page polls this after spawning
+ * a detached in-private browser window, since that window has no
+ * `window.opener` to receive the popup's `postMessage`.
+ */
+router.get("/api/auth-code/poll", (req, res) => {
+    const { state } = req.query;
+    if (!state) {
+        res.status(400).json({ ok: false, error: "state is required" });
+        return;
+    }
+    const result = authCodeResults.get(state);
+    if (!result) {
+        res.json({ pending: true });
+        return;
+    }
+    authCodeResults.delete(state);
+    res.json(result);
 });
 // ── HTML page ────────────────────────────────────────────────────────────────
 router.get("/", (_req, res) => {
@@ -637,14 +746,13 @@ async function saveBasicAuth() {
   if (d.ok) el.innerHTML = '<div class="result ok" style="margin-top:8px">✓ Saved</div>';
 }
 
-// ── Auth Code + PKCE Flow (popup window) ──────────────────────────────────────
+// ── Auth Code + PKCE Flow (in-private browser, popup fallback) ───────────────
 let authCodePopup = null;
+let authCodePollTimer = null;
 
-function onAuthCodeMessage(event) {
-  if (event.origin !== window.location.origin) return;
-  const data = event.data;
-  if (!data || data.type !== 'auth-code-callback') return;
-
+function handleAuthResult(data) {
+  clearInterval(authCodePollTimer);
+  authCodePollTimer = null;
   window.removeEventListener('message', onAuthCodeMessage);
   const statusEl = document.getElementById('dc-status');
   const modal = document.getElementById('dc-modal');
@@ -658,6 +766,26 @@ function onAuthCodeMessage(event) {
     statusEl.textContent = data.error || 'Sign-in failed';
     statusEl.className = 'status error';
   }
+}
+
+function onAuthCodeMessage(event) {
+  if (event.origin !== window.location.origin) return;
+  const data = event.data;
+  if (!data || data.type !== 'auth-code-callback') return;
+  handleAuthResult(data);
+}
+
+function pollAuthResult(state) {
+  authCodePollTimer = setInterval(async () => {
+    try {
+      const r = await fetch('/dashboard/setup/api/auth-code/poll?state=' + encodeURIComponent(state));
+      const d = await r.json();
+      if (d.pending) return;
+      handleAuthResult(d);
+    } catch {
+      // transient fetch error — keep polling until the modal is closed
+    }
+  }, 1500);
 }
 
 async function startAuthCode() {
@@ -682,9 +810,20 @@ async function startAuthCode() {
     const d = await r.json();
     if (!d.ok) { statusEl.textContent = d.error; statusEl.className = 'status error'; return; }
 
-    window.addEventListener('message', onAuthCodeMessage);
-    authCodePopup = window.open(d.authUrl, 'origo-bc-signin', 'width=500,height=650');
-    statusEl.textContent = 'Waiting for you to sign in…';
+    const openR = await fetch('/dashboard/setup/api/auth-code/open-private', {
+      method: 'POST', headers: {'Content-Type':'application/json'},
+      body: JSON.stringify({ url: d.authUrl })
+    });
+    const openD = await openR.json();
+
+    if (openD.ok) {
+      statusEl.textContent = 'Waiting for you to sign in (in-private window)…';
+      pollAuthResult(d.state);
+    } else {
+      window.addEventListener('message', onAuthCodeMessage);
+      authCodePopup = window.open(d.authUrl, 'origo-bc-signin', 'width=500,height=650');
+      statusEl.textContent = 'Waiting for you to sign in…';
+    }
   } catch (e) {
     statusEl.textContent = e.message;
     statusEl.className = 'status error';
@@ -692,6 +831,8 @@ async function startAuthCode() {
 }
 
 function closeDcModal() {
+  clearInterval(authCodePollTimer);
+  authCodePollTimer = null;
   window.removeEventListener('message', onAuthCodeMessage);
   if (authCodePopup && !authCodePopup.closed) authCodePopup.close();
   document.getElementById('dc-modal').classList.remove('active');
