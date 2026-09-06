@@ -268,16 +268,16 @@ router.post("/api/auth-code/start", (req, res) => {
  * without an ENOENT error. Since the server and browser normally run on the
  * same machine (local dev dashboard), this launches a real OS process rather
  * than a JS `window.open` popup, which cannot force private mode.
+ *
+ * Never routed through cmd.exe/`start`: cmd.exe treats unescaped `&` as a
+ * command separator, and the OAuth authorize URL is full of `&`-joined query
+ * params — cmd would silently truncate it, so browsers are spawned directly.
  */
 function trySpawn(cmd, args) {
     return new Promise((resolvePromise) => {
         let settled = false;
         try {
-            const child = spawn(cmd, args, {
-                stdio: "ignore",
-                detached: true,
-                shell: process.platform === "win32",
-            });
+            const child = spawn(cmd, args, { stdio: "ignore", detached: true });
             child.once("error", () => {
                 if (!settled) {
                     settled = true;
@@ -297,12 +297,28 @@ function trySpawn(cmd, args) {
         }
     });
 }
+/** Resolves the first existing path from a list of well-known Windows install locations. */
+function resolveWindowsExe(...candidatePaths) {
+    return candidatePaths.find((p) => existsSync(p));
+}
 async function openPrivateBrowser(url) {
+    const programFiles = process.env.ProgramFiles || "C:\\Program Files";
+    const programFilesX86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
+    const localAppData = process.env.LocalAppData || "";
     const candidates = process.platform === "win32"
         ? [
-            { cmd: "cmd", args: ["/c", "start", "", "msedge", "--inprivate", url] },
-            { cmd: "cmd", args: ["/c", "start", "", "chrome", "--incognito", url] },
-            { cmd: "cmd", args: ["/c", "start", "", "firefox", "-private-window", url] },
+            {
+                cmd: resolveWindowsExe(`${programFilesX86}\\Microsoft\\Edge\\Application\\msedge.exe`, `${programFiles}\\Microsoft\\Edge\\Application\\msedge.exe`, `${localAppData}\\Microsoft\\Edge\\Application\\msedge.exe`),
+                args: ["--inprivate", url],
+            },
+            {
+                cmd: resolveWindowsExe(`${programFiles}\\Google\\Chrome\\Application\\chrome.exe`, `${programFilesX86}\\Google\\Chrome\\Application\\chrome.exe`, `${localAppData}\\Google\\Chrome\\Application\\chrome.exe`),
+                args: ["--incognito", url],
+            },
+            {
+                cmd: resolveWindowsExe(`${programFiles}\\Mozilla Firefox\\firefox.exe`, `${programFilesX86}\\Mozilla Firefox\\firefox.exe`),
+                args: ["-private-window", url],
+            },
         ]
         : process.platform === "darwin"
             ? [
@@ -317,6 +333,8 @@ async function openPrivateBrowser(url) {
                 { cmd: "firefox", args: ["-private-window", url] },
             ];
     for (const candidate of candidates) {
+        if (!candidate.cmd)
+            continue;
         if (await trySpawn(candidate.cmd, candidate.args))
             return true;
     }
