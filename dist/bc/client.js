@@ -25,7 +25,13 @@ export async function getBcAccessToken(targetTenantId) {
     // origo-token path: refresh_token (preferred) or client_credentials.
     if (!conn.clientId)
         throw new Error("origo-token connection missing clientId");
-    const useRefresh = !conn.clientSecret && !!conn.refreshToken;
+    const useRefresh = conn.authType === "user" || (!conn.authType && !conn.clientSecret && !!conn.refreshToken);
+    if (useRefresh && !conn.refreshToken) {
+        throw new Error("User auth requires a refresh token.");
+    }
+    if (!useRefresh && !conn.clientSecret) {
+        throw new Error("S2S auth requires a client secret.");
+    }
     const cacheKey = `${targetTenantId}|${conn.clientId}|${useRefresh ? "rt" : "cc"}`;
     const cached = directCache.get(cacheKey);
     if (cached && Date.now() < cached.expiry - 60_000)

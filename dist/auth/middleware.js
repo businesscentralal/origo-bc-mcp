@@ -69,6 +69,7 @@ function buildBasicContext(authz, sessionId, connectionName) {
             tenantId: dc.tenantId,
             environment: dc.environment ?? config.defaultEnvironment,
             clientId: dc.clientId,
+            authType: dc.authType,
             clientSecret: dc.clientSecret,
             refreshToken: dc.refreshToken,
             companyId: dc.companyId,
