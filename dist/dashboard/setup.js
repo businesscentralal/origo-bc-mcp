@@ -185,6 +185,7 @@ router.post("/api/connections/validate", async (req, res) => {
             result = await validateConnection({
                 tenantId: connToValidate.tenantId,
                 clientId: connToValidate.clientId,
+                authType: connToValidate.authType,
                 clientSecret: resolveSecret(connToValidate.clientSecret),
                 refreshToken: resolveSecret(connToValidate.refreshToken),
                 environment: connToValidate.environment || "production",
