@@ -78,6 +78,12 @@ function encryptConnectionSecrets(conn, connName) {
         }
     }
 }
+// Badge type shown in the connections list: "user" | "s2s" | "on-prem"
+function connectionBadgeType(conn) {
+    if (conn.onPrem)
+        return "on-prem";
+    return conn.authType === "s2s" ? "s2s" : "user";
+}
 function secretStorageMethod() {
     if (canEncryptSecrets())
         return "aes-256-gcm";
@@ -94,7 +100,7 @@ router.get("/api/connections", (_req, res) => {
     if (config.devConnection) {
         connections.push({
             name: "default",
-            type: config.devConnection.onPrem ? "on-prem" : "saas",
+            type: connectionBadgeType(config.devConnection),
             environment: config.devConnection.environment,
             companyId: config.devConnection.companyId,
         });
@@ -103,7 +109,7 @@ router.get("/api/connections", (_req, res) => {
         for (const [name, conn] of Object.entries(config.connections)) {
             connections.push({
                 name,
-                type: conn.onPrem ? "on-prem" : "saas",
+                type: connectionBadgeType(conn),
                 environment: conn.environment,
                 companyId: conn.companyId,
             });
@@ -471,7 +477,8 @@ const SETUP_HTML = `<!DOCTYPE html>
   }
   .card h3 { font-size: 14px; margin-bottom: 12px; display: flex; align-items: center; gap: 8px; }
   .badge { font-size: 11px; padding: 2px 8px; border-radius: 12px; font-weight: 600; }
-  .badge.saas { background: #1f3a5f; color: var(--blue); }
+  .badge.user { background: #1f3a5f; color: var(--blue); }
+  .badge.s2s { background: #1f3a1f; color: var(--green); }
   .badge.on-prem { background: #2d1f00; color: var(--yellow); }
   .conn-meta { font-size: 12px; color: var(--dim); margin-bottom: 8px; }
   .conn-actions { display: flex; gap: 8px; }
@@ -547,21 +554,17 @@ const SETUP_HTML = `<!DOCTYPE html>
   </div>
 
   <div class="type-toggle">
-    <button id="type-saas" class="active" onclick="setType('saas')">SaaS (Entra)</button>
+    <button id="type-user" class="active" onclick="setType('user')">User</button>
+    <button id="type-s2s" onclick="setType('s2s')">S2S</button>
     <button id="type-onprem" onclick="setType('onprem')">On-Premises</button>
   </div>
 
   <div id="saas-fields">
-    <div class="type-toggle" style="margin-top:0; margin-bottom:12px">
-      <button id="saas-auth-s2s" class="active" onclick="setSaasAuth('s2s')">S2S</button>
-      <button id="saas-auth-user" onclick="setSaasAuth('user')">User</button>
-    </div>
-
     <div class="form-grid">
       <div class="form-group"><label>Tenant ID</label><input type="text" id="tenantId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"></div>
       <div class="form-group"><label>Client ID</label><input type="text" id="clientId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"></div>
-      <div class="form-group" id="s2s-fields"><label>Client Secret</label><input type="password" id="clientSecret" placeholder="Secret or env:VAR_NAME"><span class="hint">For app-only / service-to-service auth</span></div>
-      <div class="form-group" id="user-fields" style="display:none"><label>Refresh Token</label><input type="password" id="refreshToken" placeholder="Refresh token from browser sign-in"><span class="hint">For delegated user access</span><button type="button" class="btn-sm" onclick="startAuthCode()" id="dc-btn" style="margin-top:4px">🔑 Get Refresh Token</button></div>
+      <div class="form-group" id="s2s-fields" style="display:none"><label>Client Secret</label><input type="password" id="clientSecret" placeholder="Secret or env:VAR_NAME"><span class="hint">For app-only / service-to-service auth</span></div>
+      <div class="form-group" id="user-fields"><label>Refresh Token</label><input type="password" id="refreshToken" placeholder="Refresh token from browser sign-in"><span class="hint">For delegated user access</span><button type="button" class="btn-sm" onclick="startAuthCode()" id="dc-btn" style="margin-top:4px">🔑 Get Refresh Token</button></div>
       <div class="form-group"><label>Environment</label><input type="text" id="saas-env" placeholder="production" value="production"></div>
       <div class="form-group"><label>Company ID</label><input type="text" id="saas-companyId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"><span class="hint">Optional — limits to one company</span></div>
     </div>
@@ -607,21 +610,16 @@ const SETUP_HTML = `<!DOCTYPE html>
 </div>
 
 <script>
-let connType = 'saas';
-let saasAuthType = 's2s';
+let connType = 'user';
 
 function setType(t) {
   connType = t;
-  document.getElementById('type-saas').className = t === 'saas' ? 'active' : '';
+  document.getElementById('type-user').className = t === 'user' ? 'active' : '';
+  document.getElementById('type-s2s').className = t === 's2s' ? 'active' : '';
   document.getElementById('type-onprem').className = t === 'onprem' ? 'active' : '';
-  document.getElementById('saas-fields').style.display = t === 'saas' ? '' : 'none';
+  document.getElementById('saas-fields').style.display = t === 'user' || t === 's2s' ? '' : 'none';
   document.getElementById('onprem-fields').style.display = t === 'onprem' ? '' : 'none';
-}
 
-function setSaasAuth(t) {
-  saasAuthType = t;
-  document.getElementById('saas-auth-s2s').className = t === 's2s' ? 'active' : '';
-  document.getElementById('saas-auth-user').className = t === 'user' ? 'active' : '';
   const userFields = document.getElementById('user-fields');
   const s2sFields = document.getElementById('s2s-fields');
   const showUser = t === 'user';
@@ -693,12 +691,12 @@ function buildConnection() {
   const base = {
     tenantId: document.getElementById('tenantId').value.trim(),
     clientId: document.getElementById('clientId').value.trim(),
-    authType: saasAuthType,
+    authType: connType,
     environment: document.getElementById('saas-env').value.trim() || 'production',
     companyId: document.getElementById('saas-companyId').value.trim() || undefined,
   };
 
-  if (saasAuthType === 's2s') {
+  if (connType === 's2s') {
     return {
       ...base,
       clientSecret: document.getElementById('clientSecret').value.trim() || undefined,
