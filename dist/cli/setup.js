@@ -392,29 +392,31 @@ export async function runSetup() {
     if (isSaaS) {
         const tenantId = await ask("Entra tenant ID (GUID)");
         const clientId = await ask("App registration client ID (GUID)");
-        const authFlow = await askChoice("Authentication flow:", [
-            "Client secret",
-            "Browser sign-in (refresh token)",
-            "Environment variable (env:VAR_NAME)",
-        ], 0);
+        const authType = await askChoice("SaaS auth mode:", ["S2S", "User"], 0);
+        const isS2S = authType.startsWith("S2S");
         let clientSecret;
         let refreshToken;
-        if (authFlow.startsWith("Client secret")) {
-            clientSecret = await askSecretStorage("client secret", "BC_DEV_CLIENT_SECRET", `origo-bc-mcp-${connName}-secret`);
+        if (isS2S) {
+            const authFlow = await askChoice("Authentication method:", [
+                "Client secret",
+                "Environment variable (env:VAR_NAME)",
+            ], 0);
+            if (authFlow.startsWith("Client secret")) {
+                clientSecret = await askSecretStorage("client secret", "BC_DEV_CLIENT_SECRET", `origo-bc-mcp-${connName}-secret`);
+            }
+            else {
+                const envVar = await ask("Environment variable name for client secret", "BC_DEV_CLIENT_SECRET");
+                clientSecret = `env:${envVar}`;
+            }
         }
-        else if (authFlow.startsWith("Browser sign-in")) {
+        else {
             console.log("\n  Starting browser sign-in...");
             const rawToken = await authCodeFlow(tenantId, clientId);
             refreshToken = await wrapKnownSecret("refresh token", rawToken, "BC_DEV_REFRESH_TOKEN", `origo-bc-mcp-${connName}-token`);
         }
-        else {
-            // env:VAR_NAME for client secret
-            const envVar = await ask("Environment variable name for client secret", "BC_DEV_CLIENT_SECRET");
-            clientSecret = `env:${envVar}`;
-        }
         const environment = await ask("BC environment name", "production");
         const companyId = await ask("Company ID (GUID, optional)");
-        connection = { tenantId, clientId, environment };
+        connection = { tenantId, clientId, authType: isS2S ? "s2s" : "user", environment };
         if (clientSecret)
             connection.clientSecret = clientSecret;
         if (refreshToken)

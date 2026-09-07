@@ -21,7 +21,14 @@ const BC_API_HOST = "api.businesscentral.dynamics.com";
 const TOKEN_HOST = "login.microsoftonline.com";
 const BC_SCOPE = "https://api.businesscentral.dynamics.com/.default";
 async function acquireToken(conn) {
-    const useRefresh = !conn.clientSecret && !!conn.refreshToken;
+    const isUserFlow = conn.authType === "user" || (!conn.authType && !conn.clientSecret && !!conn.refreshToken);
+    const useRefresh = isUserFlow;
+    if (useRefresh && !conn.refreshToken) {
+        throw new Error("User auth requires a refresh token.");
+    }
+    if (!useRefresh && !conn.clientSecret) {
+        throw new Error("S2S auth requires a client secret.");
+    }
     const body = useRefresh
         ? new URLSearchParams({
             grant_type: "refresh_token",
