@@ -4,6 +4,7 @@
  * Routes:
  *   GET  /setup            — HTML page
  *   GET  /api/connections  — list all connections
+ *   GET  /api/connections/:name — full details for one connection (secrets resolved, for editing)
  *   POST /api/connections  — add or update a connection
  *   POST /api/connections/validate — validate a connection without saving
  *   DELETE /api/connections/:name  — remove a connection
@@ -127,6 +128,24 @@ router.get("/api/connections", (_req, res) => {
             method: secretStorageMethod(),
         },
     });
+});
+router.get("/api/connections/:name", (req, res) => {
+    const name = req.params.name;
+    const config = readConfig();
+    const conn = name === "default" ? config.devConnection : config.connections?.[name];
+    if (!conn) {
+        res.status(404).json({ ok: false, error: `Connection "${name}" not found` });
+        return;
+    }
+    // Resolve secrets so the edit form can be pre-filled with the real values.
+    const resolved = { ...conn };
+    if (resolved.clientSecret)
+        resolved.clientSecret = resolveSecret(resolved.clientSecret);
+    if (resolved.refreshToken)
+        resolved.refreshToken = resolveSecret(resolved.refreshToken);
+    if (resolved.key)
+        resolved.key = resolveSecret(resolved.key);
+    res.json({ ok: true, connection: resolved });
 });
 router.post("/api/connections", (req, res) => {
     const { name, connection, basicAuth } = req.body;
@@ -775,10 +794,37 @@ async function testConn(name) {
 }
 
 async function editConn(name) {
-  // For now, just set the name field — user can re-fill and save to overwrite
+  const r = await fetch('/dashboard/setup/api/connections/' + encodeURIComponent(name));
+  const d = await r.json();
+  if (!d.ok) {
+    document.getElementById('form-result').innerHTML = '<div class="result err">✗ ' + (d.error || 'Failed to load connection') + '</div>';
+    return;
+  }
+  const c = d.connection;
   document.getElementById('conn-name').value = name;
-  document.getElementById('conn-name').focus();
-  document.getElementById('form-result').innerHTML = '<div class="result info">Fill in the fields and click Save to update "' + name + '"</div>';
+
+  const type = c.onPrem ? 'onprem' : (c.authType === 's2s' ? 's2s' : 'user');
+  setType(type);
+
+  if (type === 'onprem') {
+    document.getElementById('baseUrl').value = c.baseUrl || '';
+    document.getElementById('onPremTenant').value = c.onPremTenant || 'default';
+    document.getElementById('opUser').value = c.user || '';
+    document.getElementById('opKey').value = c.key || '';
+    document.getElementById('op-companyId').value = c.companyId || '';
+    document.getElementById('op-companyName').value = c.companyName || '';
+    document.getElementById('op-env').value = c.environment || 'onprem';
+  } else {
+    document.getElementById('tenantId').value = c.tenantId || '';
+    document.getElementById('clientId').value = c.clientId || '';
+    document.getElementById('clientSecret').value = c.clientSecret || '';
+    document.getElementById('refreshToken').value = c.refreshToken || '';
+    document.getElementById('saas-env').value = c.environment || 'production';
+    document.getElementById('saas-companyId').value = c.companyId || '';
+  }
+
+  document.getElementById('form-result').innerHTML = '<div class="result info">Editing "' + name + '" — update fields and click Save to overwrite</div>';
+  document.getElementById('conn-name').scrollIntoView({ behavior: 'smooth', block: 'center' });
 }
 
 async function saveBasicAuth() {

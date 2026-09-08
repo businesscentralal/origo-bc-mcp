@@ -127,8 +127,19 @@ export async function authCodeFlow(tenantId, clientId) {
             console.log("  Opening your browser to complete sign-in...");
             console.log(`  If it doesn't open automatically, visit:\n  ${authUrl.toString()}\n`);
             try {
-                const opener = platform() === "win32" ? "start" : platform() === "darwin" ? "open" : "xdg-open";
-                spawnSync(opener, [authUrl.toString()], { shell: true, windowsHide: true });
+                // shell:true would join argv into a single command string without escaping,
+                // so "&" in the URL's query string gets parsed as a shell command separator
+                // and truncates it. Invoke each platform's opener directly instead.
+                const url = authUrl.toString();
+                if (platform() === "win32") {
+                    spawnSync("cmd", ["/c", "start", "", url], { windowsHide: true });
+                }
+                else if (platform() === "darwin") {
+                    spawnSync("open", [url]);
+                }
+                else {
+                    spawnSync("xdg-open", [url]);
+                }
             }
             catch { /* non-fatal */ }
         });
