@@ -584,7 +584,12 @@ const SETUP_HTML = `<!DOCTYPE html>
       <div class="form-group"><label>Tenant ID</label><input type="text" id="tenantId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"></div>
       <div class="form-group"><label>Client ID</label><input type="text" id="clientId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"></div>
       <div class="form-group" id="s2s-fields" style="display:none"><label>Client Secret</label><input type="password" id="clientSecret" placeholder="Secret or env:VAR_NAME"><span class="hint">For app-only / service-to-service auth</span></div>
-      <div class="form-group" id="user-fields"><label>Refresh Token</label><input type="password" id="refreshToken" placeholder="Refresh token from browser sign-in"><span class="hint">For delegated user access</span><button type="button" class="btn-sm" onclick="startAuthCode()" id="dc-btn" style="margin-top:4px">🔑 Get Refresh Token</button></div>
+      <div class="form-group" id="user-fields"><label>Refresh Token</label><input type="password" id="refreshToken" placeholder="Refresh token from browser sign-in"><span class="hint">For delegated user access</span>
+        <div style="margin-top:4px;display:flex;align-items:center;gap:8px">
+          <button type="button" class="btn-sm" onclick="startAuthCode()" id="dc-btn">🔑 Get Refresh Token</button>
+          <label style="font-size:12px;color:var(--dim);display:flex;align-items:center;gap:4px;cursor:pointer"><input type="checkbox" id="dc-use-private" checked style="width:auto"> Use private/incognito window</label>
+        </div>
+      </div>
       <div class="form-group"><label>Environment</label><input type="text" id="saas-env" placeholder="production" value="production"></div>
       <div class="form-group"><label>Company ID</label><input type="text" id="saas-companyId" placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"><span class="hint">Optional — limits to one company</span></div>
     </div>
@@ -906,11 +911,13 @@ async function startAuthCode() {
     const d = await r.json();
     if (!d.ok) { statusEl.textContent = d.error; statusEl.className = 'status error'; return; }
 
-    const openR = await fetch('/dashboard/setup/api/auth-code/open-private', {
-      method: 'POST', headers: {'Content-Type':'application/json'},
-      body: JSON.stringify({ url: d.authUrl })
-    });
-    const openD = await openR.json();
+    const usePrivate = document.getElementById('dc-use-private').checked;
+    const openD = usePrivate
+      ? await (await fetch('/dashboard/setup/api/auth-code/open-private', {
+          method: 'POST', headers: {'Content-Type':'application/json'},
+          body: JSON.stringify({ url: d.authUrl })
+        })).json()
+      : { ok: false };
 
     if (openD.ok) {
       statusEl.textContent = 'Waiting for you to sign in (in-private window)…';
