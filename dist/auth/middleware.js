@@ -48,6 +48,7 @@ function buildBasicContext(authz, sessionId, connectionName) {
                 environment: dc.environment ?? "onprem",
                 onPrem: true,
                 baseUrl: dc.baseUrl,
+                developerBaseUrl: dc.developerBaseUrl,
                 onPremTenant,
                 user: dc.user,
                 key: dc.key,

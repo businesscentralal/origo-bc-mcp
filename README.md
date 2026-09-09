@@ -358,6 +358,48 @@ tenants), exactly like `x-origo-token`.
 > On-prem **data** calls (message types) are wired during tool migration; the
 > connection, auth header (`onPremAuthHeader`) and company listing are in place.
 
+### Developer Services (`bc_dev_*`)
+
+Tools for AL publish/cleanup against BC **Developer Services** and the **Automation API**:
+
+| Tool | Purpose |
+|------|---------|
+| `bc_dev_get_metadata` | `GET {dev}/dev/metadata` |
+| `bc_dev_get_symbols` | `GET {dev}/dev/packages?…` — writes large binaries to disk (path + size; no base64 dump) |
+| `bc_dev_publish_app` | Multipart `POST {dev}/dev/apps?tenant&SchemaUpdateMode=…` (appPath or appBase64) |
+| `bc_dev_publish_artifact` | Download `.app` / zip from HTTPS, Azure DevOps build artifact, or GitHub Actions artifact/release; publish in dependency order |
+| `bc_dev_uninstall_app` | Automation API `Microsoft.NAV.uninstall` (not `DELETE /dev/apps`) |
+| `bc_dev_unpublish_app` | Automation API `Microsoft.NAV.unpublish` (BC 25.4+; uninstall first) |
+
+**Developer base URL:** set optional `developerBaseUrl` on `devConnection`, or derive it from on-prem `baseUrl` by replacing a trailing `rest` with `dev` (Alpaca: `…/f0a4d51d4d47rest` → `…/f0a4d51d4d47dev`). Verified publish path on Cosmo Alpaca: multipart `/dev/apps` → HTTP 200.
+
+**Cosmo vs `bc_dev_*`:** container CRUD / feed deploy / SSH info are `cosmo_*` tools (Bearer to Cosmo backend). Cosmo `cosmo_deploy_app` installs from NuGet|Azure DevOps **feeds** only — use `bc_dev_publish_artifact` for GitHub Actions artifacts / arbitrary HTTPS `.app` URLs. Uninstall/unpublish: Automation API (`bc_dev_uninstall_app` / `bc_dev_unpublish_app`) first, then SSH via `cosmo_ssh_info` + `Uninstall-NavApp` / `Unpublish-NavApp`.
+
+**Follow-up (out of scope here):** `alc` compile orchestration and a full AL test runner.
+
+**Ephemeral Cosmo loop (policy):** `cosmo_create_container` (CreateBcContainer / CreateGitHubBcContainer) → `cosmo_get_container` derives `…/{id}dev` + `…/{id}rest` into `devConnection` (CRONUS IS) → `bc_dev_publish_*` / tests / `bc_dev_uninstall_app` → `cosmo_delete_container`. Do **not** rely on standing `bc28-is` or ORI1058 as the long-term test host; `bc28-is-grok` is optional interim only. Cosmo lifecycle tools live in **this same MCP server** alongside `bc_dev_*`.
+
+
+
+
+### Cosmo Alpaca (`cosmo_*`)
+
+Same server as `bc_dev_*`. Auth: Bearer (`COSMO_BEARER_TOKEN` or `cosmo.bearerToken`). Backend: `COSMO_BACKEND_URL` / `cosmo.backendUrl` (prefer parent org/repo `backendUrl` from Cosmo; default enterprise host).
+
+| Tool | Cosmo API |
+|------|-----------|
+| `cosmo_list_containers` | `POST /Container/Container/filter` |
+| `cosmo_get_container` | `GET /Container/Container/{id}` (+ derived REST/DEV URLs) |
+| `cosmo_create_container` | `POST /Container/Container[/gitHub|/azureDevOps|/standalone]` |
+| `cosmo_update_container` | `PATCH /Container/Container/{id}` (Start|Stop, sshEnabled, …) |
+| `cosmo_delete_container` | `DELETE /Container/Container/{id}` |
+| `cosmo_deploy_app` | `POST /Container/Exec/{id}/deployApp` (NuGet\|AzureDevOps feeds) |
+| `cosmo_get_app_info` | `GET /Container/Exec/{id}/appinfo` |
+| `cosmo_ssh_info` | `GET /Container/Ssh/{id}` |
+| `cosmo_restart_nst` | `POST /Container/Exec/{id}/restartServerInstance` |
+
+**Token:** copy the GitHub or Azure DevOps Bearer used by Cosmo Alpaca VS Code 1.27 (extension session), set `COSMO_BEARER_TOKEN`, never commit it.
+
 ## Status & continuation
 
 Scaffold + dual auth + tenant access guard + discovery tools are in place and

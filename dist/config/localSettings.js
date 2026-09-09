@@ -28,6 +28,9 @@ export function getLocalSettings() {
         if (loaded.basicAuth) {
             loaded.basicAuth.password = resolveSecret(loaded.basicAuth.password) ?? loaded.basicAuth.password;
         }
+        if (loaded.cosmo) {
+            loaded.cosmo.bearerToken = resolveSecret(loaded.cosmo.bearerToken);
+        }
         if (loaded.basicAuth?.enabled) {
             console.warn(`[local-settings] Basic auth ENABLED from ${path}`);
         }

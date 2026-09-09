@@ -1,15 +1,14 @@
- {
+{
   "_comment": "Copy to config/local.settings.json (gitignored). Run 'origo-bc-mcp-server setup' for guided configuration, or use the dashboard at /dashboard/setup.",
-
   "basicAuth": {
     "enabled": true,
     "username": "dev",
     "password": "change-me"
   },
-
   "_devConnection_onprem_example": {
     "onPrem": true,
     "baseUrl": "https://<host>:443/<instance>rest",
+    "developerBaseUrl": "https://<host>:443/<instance>dev",
     "onPremTenant": "default",
     "user": "<bc-web-service-user>",
     "key": "<bc-web-service-access-key | env:VAR_NAME | dpapi:base64 | aes:base64>",
@@ -17,7 +16,6 @@
     "companyName": "OnPrem",
     "environment": "onprem"
   },
-
   "_devConnection_saas_example": {
     "tenantId": "<entra-tenant-guid>",
     "clientId": "<app-client-id>",
@@ -26,11 +24,11 @@
     "environment": "UAT",
     "companyId": "<company-guid>"
   },
-
   "devConnection": {
     "_comment": "The default connection (used when no ?connection= param is specified)",
     "onPrem": true,
     "baseUrl": "https://<host>:443/<instance>rest",
+    "developerBaseUrl": "https://<host>:443/<instance>dev",
     "onPremTenant": "default",
     "user": "<bc-web-service-user>",
     "key": "<bc-web-service-access-key>",
@@ -38,9 +36,8 @@
     "companyName": "OnPrem",
     "environment": "onprem"
   },
-
   "connections": {
-    "_comment": "Named connections — select via ?connection=<name> in the MCP URL",
+    "_comment": "Named connections \u2014 select via ?connection=<name> in the MCP URL",
     "production": {
       "tenantId": "<entra-tenant-guid>",
       "clientId": "<app-client-id>",
@@ -55,5 +52,10 @@
       "environment": "sandbox",
       "companyId": "<company-guid>"
     }
+  },
+  "cosmo": {
+    "_comment": "Cosmo Alpaca API for cosmo_* tools. Prefer COSMO_BEARER_TOKEN env. backendUrl should be the Alpaca API backend (parent org/repo backendUrl), not only the public container host.",
+    "backendUrl": "https://cosmo-alpaca-enterprise.westeurope.cloudapp.azure.com",
+    "bearerToken": "env:COSMO_BEARER_TOKEN"
   }
 }

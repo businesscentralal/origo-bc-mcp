@@ -17,6 +17,8 @@ import { registerCryptoTools } from "./tools/crypto.js";
 import { registerCloudEventsSkillTools } from "./tools/cloudEventsSkill.js";
 import { registerBcEventSubscriptionTools } from "./tools/bcEventSubscriptions.js";
 import { registerApiEndpointTools } from "./tools/apiEndpoints.js";
+import { registerDevServicesTools } from "./tools/devServices.js";
+import { registerCosmoTools } from "./tools/cosmo.js";
 import { registerSessionBootstrap } from "./tools/sessionBootstrap.js";
 import { registerMessageTypesLite } from "./tools/messageTypes.js";
 /**
@@ -46,6 +48,8 @@ export function buildServer() {
     registerCloudEventsSkillTools(server);
     registerBcEventSubscriptionTools(server);
     registerApiEndpointTools(server);
+    registerDevServicesTools(server);
+    registerCosmoTools(server);
     registerSessionBootstrap(server);
     return server;
 }
