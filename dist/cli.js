@@ -29,12 +29,14 @@ Commands:
 
 Options:
   --stdio               Speak MCP over stdin/stdout (no HTTP). Recommended for Grok Bot / Cursor local command.
+                        BC tools use local.settings devConnection (or MCP_CONNECTION named conn); no HTTP Basic.
   --config <path>       Start with a specific local.settings.json file
   --debug               Log all MCP requests, responses, and BC calls (stdio: stderr only)
   -h, --help            Show this help
 
 Examples:
   origo-bc-mcp-server --stdio
+  MCP_CONNECTION=bc28-is-grok origo-bc-mcp-server --stdio
   origo-bc-mcp-server setup
   origo-bc-mcp-server add production
   origo-bc-mcp-server verify

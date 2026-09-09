@@ -144,6 +144,32 @@ npm run start:stdio
 
 Same full tool set as HTTP (`bc_dev_*`, `cosmo_*`, and all tools from `buildServer`). Optional: `MCP_LITE=1` for the reduced set.
 
+### Stdio auth for BC tools
+
+HTTP Basic middleware does **not** run on `--stdio`. Before tool handlers run, the process installs an auth context from `local.settings.json`:
+
+| Source | Role |
+|--------|------|
+| `MCP_LOCAL_SETTINGS_PATH` (or `~/.origo-bc-mcp/local.settings.json`) | Loads settings |
+| `devConnection` | Used when `MCP_CONNECTION` is unset or `default` |
+| `connections.<name>` | Used when `MCP_CONNECTION=<name>` (e.g. `bc28-is-grok`) |
+| `basicAuth` | Optional; username becomes the stdio principal label. **Credentials are not required** on stdio (no HTTP headers). |
+| Cosmo (`cosmo_*`) | Independent — Bearer via `COSMO_BEARER_TOKEN` / `gh`; does **not** need BC auth context |
+
+Without a resolvable `devConnection` / named connection, `who_am_i` and `bc_dev_*` fail with `No auth context — request reached a tool without authentication.`
+
+```bash
+# default → local.settings.devConnection
+origo-bc-mcp-server --stdio
+
+# named connection (e.g. Cosmo Alpaca container wired as bc28-is-grok)
+MCP_CONNECTION=bc28-is-grok \
+MCP_LOCAL_SETTINGS_PATH=~/.origo-bc-mcp/local.settings.json \
+  origo-bc-mcp-server --stdio
+```
+
+Prefer `env:` / env vars for secrets in `local.settings` (`user`/`key`, client secrets, Cosmo token).
+
 ### Grok Bot / Cursor local `command` (mcp.json)
 
 Prefer env for secrets (do not put tokens in tool args). Example:
@@ -159,7 +185,8 @@ Prefer env for secrets (do not put tokens in tool args). Example:
         "ADO_PAT": "<optional Azure DevOps PAT for bc_dev_publish_artifact>",
         "GITHUB_TOKEN": "<optional for GitHub artifacts>",
         "MCP_ENCRYPTION_KEY": "<64 hex chars if local.settings uses aes: secrets>",
-        "MCP_LOCAL_SETTINGS_PATH": "/path/to/local.settings.json"
+        "MCP_LOCAL_SETTINGS_PATH": "/path/to/local.settings.json",
+        "MCP_CONNECTION": "bc28-is-grok"
       }
     }
   }
@@ -170,6 +197,7 @@ Notes:
 
 - `command` is resolved on the **Grok Bot / Architect box** (where the agent runs), not on ORI1058.
 - Install the package on that box (`npm install -g github:businesscentralal/origo-bc-mcp` or from the Azure Artifacts feed).
+- **BC tools over stdio** need `devConnection` (or `connections[MCP_CONNECTION]`) in `local.settings.json` — see [Stdio auth for BC tools](#stdio-auth-for-bc-tools).
 - Connection secrets belong in env or `local.settings.json` with `env:` / `aes:` prefixes — tool `pat` / `token` args are optional overrides only.
 - HTTP `url` pointing at ORI1058 localhost is **not** usable from Cursor’s remote MCP path; use stdio instead.
 

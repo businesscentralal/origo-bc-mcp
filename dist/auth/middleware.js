@@ -1,9 +1,10 @@
 import crypto from "node:crypto";
 import { config } from "../config.js";
 import { runWithAuth } from "./context.js";
+import { buildDevConnectionContext } from "./devContext.js";
 import { verifyBearer } from "./entra.js";
 import { connectionFromOrigoToken } from "./origoToken.js";
-import { getLocalSettings, getConnection, isBasicAuthEnabled } from "../config/localSettings.js";
+import { getLocalSettings, isBasicAuthEnabled } from "../config/localSettings.js";
 import { getSelection, setSelection } from "../session/store.js";
 function header(req, name) {
     const v = req.headers[name];
@@ -14,7 +15,7 @@ function safeEqual(a, b) {
     const bb = Buffer.from(b);
     return ab.length === bb.length && crypto.timingSafeEqual(ab, bb);
 }
-/** Dev-only: build a context from Basic auth + the local dev connection. */
+/** Dev-only: validate Basic auth, then build context from the local dev connection. */
 function buildBasicContext(authz, sessionId, connectionName) {
     const ls = getLocalSettings();
     const ba = ls.basicAuth;
@@ -25,58 +26,20 @@ function buildBasicContext(authz, sessionId, connectionName) {
     if (!safeEqual(user, ba.username) || !safeEqual(pass, ba.password)) {
         throw new Error("Invalid Basic credentials");
     }
-    const dc = getConnection(connectionName);
-    if (!dc) {
-        const msg = connectionName
-            ? `Connection "${connectionName}" not found in local.settings.json`
-            : "Basic auth is enabled but devConnection is missing in local.settings.json";
-        throw new Error(msg);
-    }
-    // On-prem dev connection (Basic auth against a BC REST base URL).
-    if (dc.onPrem || dc.baseUrl) {
-        if (!dc.baseUrl || !dc.user || !dc.key) {
-            throw new Error("On-prem devConnection requires baseUrl, user and key in local.settings.json");
-        }
-        const onPremTenant = dc.onPremTenant ?? "default";
-        return {
-            method: "basic",
-            homeTenantId: onPremTenant,
+    try {
+        return buildDevConnectionContext({
+            connectionName,
             principal: user,
             sessionId,
-            conn: {
-                tenantId: onPremTenant,
-                environment: dc.environment ?? "onprem",
-                onPrem: true,
-                baseUrl: dc.baseUrl,
-                developerBaseUrl: dc.developerBaseUrl,
-                onPremTenant,
-                user: dc.user,
-                key: dc.key,
-                companyId: dc.companyId,
-                companyName: dc.companyName,
-            },
-        };
+        });
     }
-    // SaaS dev connection (Entra: refresh token or client credentials).
-    if (!dc.tenantId || !dc.clientId) {
-        throw new Error("SaaS devConnection requires tenantId + clientId in local.settings.json");
+    catch (e) {
+        const msg = e.message;
+        if (!connectionName && msg.includes("devConnection is missing")) {
+            throw new Error("Basic auth is enabled but devConnection is missing in local.settings.json");
+        }
+        throw e;
     }
-    return {
-        method: "basic",
-        homeTenantId: dc.tenantId,
-        principal: user,
-        sessionId,
-        conn: {
-            tenantId: dc.tenantId,
-            environment: dc.environment ?? config.defaultEnvironment,
-            clientId: dc.clientId,
-            authType: dc.authType,
-            clientSecret: dc.clientSecret,
-            refreshToken: dc.refreshToken,
-            companyId: dc.companyId,
-            companyName: dc.companyName,
-        },
-    };
 }
 async function buildContext(req) {
     const sessionId = header(req, "mcp-session-id");
