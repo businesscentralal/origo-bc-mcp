@@ -3,6 +3,7 @@
  * Paths aligned with Cosmo Alpaca VS Code ext 1.27 OpenAPI client.
  */
 import { getLocalSettings } from "../config/localSettings.js";
+import { resolveSecret } from "../config/resolveSecret.js";
 /** Public container host (REST/DEV path prefix). Not the Alpaca API base. */
 const DEFAULT_PUBLIC_HOST = "https://cosmo-alpaca-enterprise.westeurope.cloudapp.azure.com";
 /** Alpaca OpenAPI basePath (VS Code ext 1.27). Bare host alone 404s on /Container/*. */
@@ -15,10 +16,12 @@ export function getCosmoConfig(overrides) {
         DEFAULT_BACKEND)
         .trim()
         .replace(/\/+$/, "");
-    const bearerToken = (overrides?.bearerToken ||
+    const rawBearer = overrides?.bearerToken ||
         process.env.COSMO_BEARER_TOKEN ||
         ls.cosmo?.bearerToken ||
-        "").trim();
+        "";
+    // Support env:/aes:/plain: prefixes when token comes from settings or overrides.
+    const bearerToken = (resolveSecret(rawBearer) ?? rawBearer).trim();
     if (!bearerToken) {
         throw new Error("Cosmo auth missing. Set COSMO_BEARER_TOKEN, or cosmo.bearerToken in local.settings.json. " +
             "Obtain a token from the Cosmo Alpaca VS Code extension session (GitHub or Azure DevOps " +

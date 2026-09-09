@@ -107,11 +107,14 @@ setSessionTracker(() => Object.entries(transports).map(([id, t]) => ({
 app.use("/dashboard", dashboardRouter);
 // --- Ollama proxy (normalizes tool call arguments) ------------------------
 app.use("/ollama", ollamaProxyRouter);
-app.listen(config.port, () => {
-    console.log(`origo-bc-mcp listening on :${config.port} (${config.nodeEnv}${liteMode ? ", LITE" : ""})`);
+app.listen(config.port, config.host, () => {
+    console.log(`origo-bc-mcp listening on ${config.host}:${config.port} (${config.nodeEnv}${liteMode ? ", LITE" : ""})`);
     console.log(`  MCP endpoint:    ${config.publicUrl}/mcp`);
     console.log(`  Dashboard:       ${config.publicUrl}/dashboard`);
     console.log(`  Health:          ${config.publicUrl}/healthz`);
+    if (config.host === "127.0.0.1" || config.host === "localhost") {
+        console.log(`  Bind:            ${config.host} (local only — set MCP_HOST=0.0.0.0 for Docker)`);
+    }
     if (liteMode)
         console.log(`  LITE MODE:       reduced tool set for local LLMs`);
     if (debug)

@@ -259,7 +259,7 @@ export function registerDevServicesTools(server) {
                     project: z.string(),
                     buildId: z.union([z.number(), z.string()]),
                     artifactName: z.string(),
-                    pat: z.string().optional(),
+                    pat: z.string().optional().describe("Prefer ADO_PAT / AZURE_DEVOPS_EXT_PAT env over tool args."),
                 })
                     .optional(),
                 github: z
@@ -269,7 +269,7 @@ export function registerDevServicesTools(server) {
                     artifactId: z.union([z.number(), z.string()]).optional(),
                     releaseTag: z.string().optional(),
                     assetName: z.string().optional(),
-                    token: z.string().optional(),
+                    token: z.string().optional().describe("Prefer GITHUB_TOKEN env over tool args."),
                 })
                     .optional(),
                 /** When the download is a zip with multiple apps, optional ordered .app file name filters. */

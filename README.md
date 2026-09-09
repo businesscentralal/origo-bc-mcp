@@ -125,6 +125,54 @@ origo-bc-mcp listening on :3000 (development, LITE)
 
 To use lite mode with a named connection or PM2, set `MCP_LITE=1` in that process's environment (e.g. `ecosystem.config.cjs` `env` block for a second PM2 app entry).
 
+## Transports: stdio (recommended) vs HTTP
+
+| Transport | When to use | Network |
+|-----------|-------------|---------|
+| **stdio** (`--stdio`) | **Grok Bot / Cursor local `command` MCP** on the Architect box (shared by all his agents) | None — process stdin/stdout only |
+| **HTTP** (default) | Local dashboard, health checks, Docker on a private host | Binds **`127.0.0.1`** by default (`MCP_HOST`). Docker/PM2 set `MCP_HOST=0.0.0.0` for container publish. Do **not** expose publicly (no public Caddy). |
+
+Remote HTTP `url` MCP from Cursor’s backend cannot reach ORI1058/E4-212 localhost. Stdio runs the server **on the Grok Bot computer (Architect box)**, not on ORI1058.
+
+### Run stdio
+
+```bash
+origo-bc-mcp-server --stdio
+# or, after build:
+npm run start:stdio
+```
+
+Same full tool set as HTTP (`bc_dev_*`, `cosmo_*`, and all tools from `buildServer`). Optional: `MCP_LITE=1` for the reduced set.
+
+### Grok Bot / Cursor local `command` (mcp.json)
+
+Prefer env for secrets (do not put tokens in tool args). Example:
+
+```json
+{
+  "mcpServers": {
+    "origo-bc-mcp": {
+      "command": "origo-bc-mcp-server",
+      "args": ["--stdio"],
+      "env": {
+        "COSMO_BEARER_TOKEN": "<from Cosmo Alpaca session>",
+        "ADO_PAT": "<optional Azure DevOps PAT for bc_dev_publish_artifact>",
+        "GITHUB_TOKEN": "<optional for GitHub artifacts>",
+        "MCP_ENCRYPTION_KEY": "<64 hex chars if local.settings uses aes: secrets>",
+        "MCP_LOCAL_SETTINGS_PATH": "/path/to/local.settings.json"
+      }
+    }
+  }
+}
+```
+
+Notes:
+
+- `command` is resolved on the **Grok Bot / Architect box** (where the agent runs), not on ORI1058.
+- Install the package on that box (`npm install -g github:businesscentralal/origo-bc-mcp` or from the Azure Artifacts feed).
+- Connection secrets belong in env or `local.settings.json` with `env:` / `aes:` prefixes — tool `pat` / `token` args are optional overrides only.
+- HTTP `url` pointing at ORI1058 localhost is **not** usable from Cursor’s remote MCP path; use stdio instead.
+
 ## Start the server
 
 ```bash
@@ -134,11 +182,14 @@ origo-bc-mcp-server
 Expected output:
 
 ```
-origo-bc-mcp listening on :3000 (development)
+origo-bc-mcp listening on 127.0.0.1:3000 (development)
   MCP endpoint:    http://localhost:3000/mcp
   Dashboard:       http://localhost:3000/dashboard
   Health:          http://localhost:3000/healthz
+  Bind:            127.0.0.1 (local only — set MCP_HOST=0.0.0.0 for Docker)
 ```
+
+For local HTTP only on loopback (default). Prefer `--stdio` for Grok Bot / Cursor local command.
 
 ## Dashboard
 
@@ -190,19 +241,23 @@ Commands:
   init                  Create ~/.origo-bc-mcp/local.settings.json from template
 
 Options:
+  --stdio               MCP over stdin/stdout (recommended for Grok Bot / Cursor local)
   --config <path>       Start with a specific local.settings.json
+  --debug               Verbose logging (stdio → stderr)
   -h, --help            Show help
 ```
 
 ## Configure an MCP client
 
-The `setup` wizard writes VS Code's `mcp.json` automatically. For other clients, add:
+**Recommended (stdio):** see [Transports: stdio (recommended) vs HTTP](#transports-stdio-recommended-vs-http) for Grok Bot / Cursor `command` + `args` + `env`.
+
+The `setup` wizard writes VS Code's `mcp.json` automatically (HTTP). For other clients using **local HTTP** (loopback only):
 
 ```json
 {
   "servers": {
     "origo-bc-mcp": {
-      "url": "http://localhost:3000/mcp",
+      "url": "http://127.0.0.1:3000/mcp",
       "headers": {
         "Authorization": "Basic <base64-encoded username:password>"
       }
@@ -471,7 +526,7 @@ into `src/tools/`, then deploy to dev via Azure DevOps.
 
 ### Run with Docker
 
-The included `Dockerfile` builds a production image with PM2 for automatic restarts. Configuration is stored in a `/data` volume inside the container and managed through the web dashboard.
+The included `Dockerfile` builds a production image with PM2 for automatic restarts. It sets `MCP_HOST=0.0.0.0` so published ports work; the image is still intended for **private** hosts only (not public Caddy). Configuration is stored in a `/data` volume inside the container and managed through the web dashboard.
 
 #### Step 1: Build the image
 

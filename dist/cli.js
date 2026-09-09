@@ -2,7 +2,8 @@
 /**
  * CLI entry point for origo-bc-mcp-server.
  * Supports:
- *   origo-bc-mcp-server          — starts the server
+ *   origo-bc-mcp-server --stdio  — MCP over stdin/stdout (recommended for Grok Bot / Cursor local)
+ *   origo-bc-mcp-server          — starts HTTP server (default bind 127.0.0.1)
  *   origo-bc-mcp-server init     — creates ~/.origo-bc-mcp/local.settings.json from template
  *   origo-bc-mcp-server --config — starts with a specific config path
  */
@@ -27,11 +28,13 @@ Commands:
   init                  Create ~/.origo-bc-mcp/local.settings.json from the package template
 
 Options:
+  --stdio               Speak MCP over stdin/stdout (no HTTP). Recommended for Grok Bot / Cursor local command.
   --config <path>       Start with a specific local.settings.json file
-  --debug               Log all MCP requests, responses, and BC calls to console
+  --debug               Log all MCP requests, responses, and BC calls (stdio: stderr only)
   -h, --help            Show this help
 
 Examples:
+  origo-bc-mcp-server --stdio
   origo-bc-mcp-server setup
   origo-bc-mcp-server add production
   origo-bc-mcp-server verify
@@ -119,6 +122,13 @@ else if (!process.env.MCP_LOCAL_SETTINGS_PATH) {
         process.env.MCP_LOCAL_SETTINGS_PATH = CONFIG_FILE;
     }
 }
-// Start the server
-await import("./index.js");
+const wantStdio = args.includes("--stdio");
+if (wantStdio) {
+    const { startStdioServer } = await import("./stdio.js");
+    await startStdioServer();
+}
+else {
+    // HTTP Streamable (local dashboard/health; default bind 127.0.0.1)
+    await import("./index.js");
+}
 //# sourceMappingURL=cli.js.map

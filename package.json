@@ -1,7 +1,7 @@
 {
   "name": "origo-bc-mcp-server",
-  "version": "0.1.2197",
-  "description": "Origo Business Central MCP server (mcp.dynamics.is) — Streamable HTTP, dual auth (OAuth 2.1 + x-origo-token).",
+  "version": "0.1.2198",
+  "description": "Origo Business Central MCP server (mcp.dynamics.is) — stdio + Streamable HTTP (127.0.0.1 by default), dual auth (OAuth 2.1 + x-origo-token).",
   "type": "module",
   "engines": {
     "node": ">=22"

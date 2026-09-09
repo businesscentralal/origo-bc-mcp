@@ -15,6 +15,8 @@ function parseAllowedTenants() {
 }
 export const config = {
     port: Number(opt("PORT", "3000")),
+    /** Bind address for HTTP. Default 127.0.0.1 (local only). Docker sets MCP_HOST=0.0.0.0. */
+    host: opt("MCP_HOST", "127.0.0.1"),
     nodeEnv: opt("NODE_ENV", "development"),
     publicUrl: opt("MCP_PUBLIC_URL", "http://localhost:3000"),
     debug: process.argv.includes("--debug") || opt("MCP_DEBUG") === "1",

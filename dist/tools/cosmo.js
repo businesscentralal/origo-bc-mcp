@@ -196,7 +196,7 @@ export function registerCosmoTools(server) {
                 scope: z.enum(["Organization", "Project"]).optional(),
                 version: z.string().optional(),
                 view: z.string().optional(),
-                pat: z.string().optional(),
+                pat: z.string().optional().describe("Prefer ADO_PAT / AZURE_DEVOPS_EXT_PAT env instead of passing PAT in tool args."),
             })
                 .optional(),
             backendUrl: backendUrlField,

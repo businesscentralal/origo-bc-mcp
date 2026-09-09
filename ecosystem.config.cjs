@@ -12,6 +12,7 @@ module.exports = {
       max_memory_restart: "512M",
       env: {
         NODE_ENV: "production",
+        MCP_HOST: "0.0.0.0",
       },
       // PM2 log management
       merge_logs: true,
