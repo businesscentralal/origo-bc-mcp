@@ -126,6 +126,9 @@ else if (!process.env.MCP_LOCAL_SETTINGS_PATH) {
 }
 const wantStdio = args.includes("--stdio");
 if (wantStdio) {
+    // Process-wide before stdio module loads (survives duplicate ESM graphs).
+    process.env.MCP_STDIO_AUTH = "1";
+    process.env.MCP_TRANSPORT = "stdio";
     const { startStdioServer } = await import("./stdio.js");
     await startStdioServer();
 }

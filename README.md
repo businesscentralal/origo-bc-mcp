@@ -146,7 +146,11 @@ Same full tool set as HTTP (`bc_dev_*`, `cosmo_*`, and all tools from `buildServ
 
 ### Stdio auth for BC tools
 
-HTTP Basic middleware does **not** run on `--stdio`. Before tool handlers run, the process installs an auth context from `local.settings.json`:
+HTTP Basic middleware does **not** run on `--stdio`. Auth is installed and re-bound as follows:
+
+1. **Startup** — `MCP_STDIO_AUTH=1` plus a process auth context from `local.settings.json` (`devConnection` or `connections[MCP_CONNECTION]`).
+2. **Every `tools/call`** — the MCP request handler is wrapped with `ensureAuthBound` so ALS is re-entered for that invocation (Cursor AddMcpServer can otherwise run handlers outside the startup ALS/`enterWith` tree).
+3. **`getAuthContext` fallback** — if ALS and the process fallback are both missing, rebuild from `MCP_CONNECTION` / local.settings (covers duplicate module instances).
 
 | Source | Role |
 |--------|------|
@@ -154,7 +158,7 @@ HTTP Basic middleware does **not** run on `--stdio`. Before tool handlers run, t
 | `devConnection` | Used when `MCP_CONNECTION` is unset or `default` |
 | `connections.<name>` | Used when `MCP_CONNECTION=<name>` (e.g. `bc28-is-grok`) |
 | `basicAuth` | Optional; username becomes the stdio principal label. **Credentials are not required** on stdio (no HTTP headers). |
-| Cosmo (`cosmo_*`) | Independent — Bearer via `COSMO_BEARER_TOKEN` / `gh`; does **not** need BC auth context |
+| Cosmo (`cosmo_*`) | Independent — Bearer via `COSMO_BEARER_TOKEN` / `gh`; does **not** need BC auth context (binder is a no-op when BC settings are absent) |
 
 Without a resolvable `devConnection` / named connection, `who_am_i` and `bc_dev_*` fail with `No auth context — request reached a tool without authentication.`
 
