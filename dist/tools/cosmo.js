@@ -9,7 +9,8 @@ const backendUrlField = z
     .string()
     .optional()
     .describe("Optional Cosmo backendUrl override (prefer parent org/repo backendUrl from Cosmo). " +
-    "Defaults to COSMO_BACKEND_URL / cosmo.backendUrl / enterprise default.");
+    "Must be the Alpaca API base (.../api/alpaca/release), not the bare public host. " +
+    "Defaults to COSMO_BACKEND_URL / cosmo.backendUrl / enterprise release base.");
 const containerIdField = z.string().describe("Cosmo container id (e.g. f0a4d51d4d47).");
 const bcArtifactSchema = z
     .object({
@@ -262,6 +263,7 @@ export function registerCosmoTools(server) {
                 backendUrl: cfg.backendUrl,
                 bearerTokenConfigured: true,
                 bearerTokenLength: cfg.bearerToken.length,
+                defaultBackendUrl: "https://cosmo-alpaca-enterprise.westeurope.cloudapp.azure.com/api/alpaca/release",
                 defaultPublicHost: "https://cosmo-alpaca-enterprise.westeurope.cloudapp.azure.com",
                 howToObtainToken: "Use the Bearer token from a signed-in Cosmo Alpaca VS Code 1.27 session " +
                     "(GitHub or Azure DevOps auth provider), or set COSMO_BEARER_TOKEN / cosmo.bearerToken.",

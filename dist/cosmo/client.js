@@ -3,7 +3,10 @@
  * Paths aligned with Cosmo Alpaca VS Code ext 1.27 OpenAPI client.
  */
 import { getLocalSettings } from "../config/localSettings.js";
-const DEFAULT_BACKEND = "https://cosmo-alpaca-enterprise.westeurope.cloudapp.azure.com";
+/** Public container host (REST/DEV path prefix). Not the Alpaca API base. */
+const DEFAULT_PUBLIC_HOST = "https://cosmo-alpaca-enterprise.westeurope.cloudapp.azure.com";
+/** Alpaca OpenAPI basePath (VS Code ext 1.27). Bare host alone 404s on /Container/*. */
+const DEFAULT_BACKEND = `${DEFAULT_PUBLIC_HOST}/api/alpaca/release`;
 export function getCosmoConfig(overrides) {
     const ls = getLocalSettings();
     const backendUrl = (overrides?.backendUrl ||
@@ -81,7 +84,7 @@ export async function cosmoRequest(method, path, opts) {
 }
 /** Derive BC REST/DEV bases from container id + Cosmo public host (Alpaca pattern). */
 export function deriveBcEndpoints(containerId, publicHost) {
-    const host = (publicHost || DEFAULT_BACKEND).replace(/\/+$/, "");
+    const host = (publicHost || DEFAULT_PUBLIC_HOST).replace(/\/+$/, "");
     const id = containerId.replace(/\/+$/, "");
     return {
         containerId: id,
@@ -90,14 +93,17 @@ export function deriveBcEndpoints(containerId, publicHost) {
     };
 }
 export function cosmoErrorHint(status, body) {
+    const bodyPreview = typeof body === "string" ? body.slice(0, 300) : JSON.stringify(body)?.slice(0, 300);
     if (status === 401 || status === 403) {
         return (`Cosmo API HTTP ${status}. Refresh COSMO_BEARER_TOKEN (GitHub or Azure DevOps bearer from ` +
-            `Cosmo Alpaca VS Code session). Body: ${typeof body === "string" ? body.slice(0, 300) : JSON.stringify(body)?.slice(0, 300)}`);
+            `Cosmo Alpaca VS Code session). Body: ${bodyPreview}`);
     }
     if (status === 404) {
-        return (`Cosmo API HTTP 404 for this path/host. Confirm cosmo.backendUrl / COSMO_BACKEND_URL matches ` +
-            `the backendUrl returned for your org/repo (parent resource), not only the public container host. ` +
-            `Body: ${typeof body === "string" ? body.slice(0, 300) : JSON.stringify(body)?.slice(0, 300)}`);
+        const defaultApiBase = `${DEFAULT_PUBLIC_HOST}/api/alpaca/release`;
+        return (`Cosmo API HTTP 404 for this path/host. Default backend is ${defaultApiBase} ` +
+            `(Alpaca release basePath). A bare public host without /api/alpaca/release yields nginx 404 ` +
+            `on /Container/*. Prefer parent org/repo backendUrl from Cosmo when it differs. ` +
+            `Body: ${bodyPreview}`);
     }
     return undefined;
 }
