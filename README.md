@@ -150,7 +150,8 @@ HTTP Basic middleware does **not** run on `--stdio`. Auth is installed and re-bo
 
 1. **Startup** — `MCP_STDIO_AUTH=1` plus a process auth context from `local.settings.json` (`devConnection` or `connections[MCP_CONNECTION]`).
 2. **Every `tools/call`** — the MCP request handler is wrapped with `ensureAuthBound` so ALS is re-entered for that invocation (Cursor AddMcpServer can otherwise run handlers outside the startup ALS/`enterWith` tree).
-3. **`getAuthContext` fallback** — if ALS and the process fallback are both missing, rebuild from `MCP_CONNECTION` / local.settings (covers duplicate module instances).
+3. **`getAuthContext` fallback** — if ALS and the process fallback are both missing, read `globalThis` (shared across duplicate ESM graphs) then rebuild from `MCP_CONNECTION` / local.settings.
+4. **`registerTool` wrap** — every tool callback is wrapped with `withStdioAuth` at registration so Cursor handlers re-bind even when outside the startup ALS tree.
 
 | Source | Role |
 |--------|------|

@@ -1,4 +1,5 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { withStdioAuth } from "./auth/context.js";
 import { registerDiscoveryTools } from "./tools/discovery.js";
 import { registerWhoAmI } from "./tools/whoami.js";
 import { registerTableMetadataTools } from "./tools/tableMetadata.js";
@@ -22,6 +23,20 @@ import { registerCosmoTools } from "./tools/cosmo.js";
 import { registerSessionBootstrap } from "./tools/sessionBootstrap.js";
 import { registerMessageTypesLite } from "./tools/messageTypes.js";
 /**
+ * Patch registerTool so every tool callback re-binds stdio auth via withStdioAuth.
+ * Critical for Cursor AddMcpServer: handlers can run outside ALS and/or in a
+ * duplicate auth/context module instance; withStdioAuth → ensureAuthBound uses
+ * globalThis + local.settings rebuild. Cosmo tools stay fine when BC auth is
+ * absent (ensureAuthBound is a no-op then).
+ */
+function patchRegisterToolWithStdioAuth(server) {
+    const original = server.registerTool.bind(server);
+    server.registerTool = ((name, config, cb) => {
+        // SDK overloads: always last arg is the callback.
+        return original(name, config, withStdioAuth(cb));
+    });
+}
+/**
  * Builds a fresh MCP server instance with all tools registered.
  * One instance is created per Streamable HTTP session.
  */
@@ -30,6 +45,7 @@ export function buildServer() {
         name: "origo-bc-mcp",
         version: "0.1.0",
     });
+    patchRegisterToolWithStdioAuth(server);
     registerWhoAmI(server);
     registerDiscoveryTools(server);
     registerTableMetadataTools(server);
@@ -62,6 +78,7 @@ export function buildLiteServer() {
         name: "origo-bc-mcp",
         version: "0.1.0",
     });
+    patchRegisterToolWithStdioAuth(server);
     registerWhoAmI(server); // 1 tool
     registerMessageTypesLite(server); // 3 tools: invoke_message_type, list_message_types, get_message_type_help
     registerDataRecordTools(server); // 5 tools: get_records, set_records, get_record_ids, batch_records, get_document_lines
