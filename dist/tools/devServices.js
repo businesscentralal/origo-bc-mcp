@@ -1,9 +1,9 @@
 /**
  * BC Developer Services MCP tools — metadata, symbols, publish .app / artifacts,
- * and uninstall/unpublish via Automation API.
+ * uninstall/unpublish via Automation API, and AL unit tests (bc_dev_run_tests).
  *
- * Out of scope (see README): alc compile, full AL test runner, container CRUD
- * (use Cosmo Alpaca VS Code extension lifecycle tools instead).
+ * Still out of scope: alc compile orchestration, container CRUD
+ * (use Cosmo Alpaca lifecycle tools instead).
  */
 import { z } from "zod";
 import { randomUUID } from "node:crypto";
@@ -12,6 +12,7 @@ import { mkdirSync, writeFileSync, existsSync, readFileSync } from "node:fs";
 import { getAuthContext } from "../auth/context.js";
 import { resolveTarget, json } from "../bc/runtime.js";
 import { resolveDeveloperBaseUrl, bcDevRequest, findExtensions, automationBoundAction, automationAuthError, defaultSymbolsDir, defaultArtifactDir, downloadToFile, extractAppsFromZip, schemaUpdateModeQuery, tenantQuery, buildAppMultipart, readAppBytes, } from "../bc/developer.js";
+import { runBcTests } from "../bc/runTests.js";
 const schemaUpdateModeEnum = z
     .enum(["Synchronize", "Recreate", "ForceSync", "synchronize", "recreate", "forcesync"])
     .optional()
@@ -485,6 +486,61 @@ export function registerDevServicesTools(server) {
                 }
                 : {}),
         });
+    });
+    // ── bc_dev_run_tests ──────────────────────────────────────────────────────
+    server.registerTool("bc_dev_run_tests", {
+        title: "Run AL unit tests (Cosmo SSH / BcContainerHelper)",
+        description: "Runs AL unit tests against the connected container. " +
+            "Preferred: Cosmo SSH when cosmo_ssh_info.available=true — SSH as sshuser with privateKey and " +
+            "invoke Invoke-NavContainerTests / Run-TestsInBcContainer / Run-AlTests on the remote host. " +
+            "If SSH available=false: returns a clear blocked error (no silent fallback) with Stop→Start " +
+            "recreate + create-with-sshEnabled=true hints. " +
+            "Cosmo has no /Container/Exec/{id} test-runner endpoint (only deployApp/appinfo/restartServerInstance/…). " +
+            "mode=helper is local-docker only (containerName). Reuses stdio/devConnection NavUserPassword auth. " +
+            "Returns structured passed/failed/skipped + failure messages (not megabyte dumps). " +
+            "Cosmo lifecycle tools stay separate (cosmo_*).",
+        inputSchema: {
+            extensionId: z
+                .string()
+                .optional()
+                .describe("App id (GUID) of the test extension — runs tests in that app when supported."),
+            testCodeunit: z
+                .string()
+                .optional()
+                .describe("Optional test codeunit id or name filter."),
+            testFunction: z.string().optional().describe("Optional test function name filter."),
+            testSuite: z.string().optional().describe("Test suite name (default DEFAULT)."),
+            companyName: z
+                .string()
+                .optional()
+                .describe("Company to run tests in (default: connection companyName or CRONUS IS)."),
+            tenant: z.string().optional().describe("Tenant (default: onPremTenant or default)."),
+            containerId: z
+                .string()
+                .optional()
+                .describe("Cosmo container id — required for mode=auto|ssh (e.g. f0a4d51d4d47)."),
+            containerName: z
+                .string()
+                .optional()
+                .describe("Local docker BC container name (mode=helper only)."),
+            mode: z
+                .enum(["auto", "ssh", "helper"])
+                .optional()
+                .describe("auto/ssh: Cosmo SSH path; helper: local docker only. Default auto."),
+            sshUser: z
+                .string()
+                .optional()
+                .describe("SSH username (default sshuser / COSMO_SSH_USER)."),
+            detailed: z.boolean().optional().describe("Pass -detailed to the remote test helper (default true)."),
+            timeoutMs: z
+                .number()
+                .optional()
+                .describe("Kill the SSH/PowerShell run after this many ms (default 900000 = 15 min)."),
+        },
+    }, async (args) => {
+        const ctx = getAuthContext();
+        const result = await runBcTests(args, ctx.conn);
+        return json(result);
     });
 }
 //# sourceMappingURL=devServices.js.map

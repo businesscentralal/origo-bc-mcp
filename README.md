@@ -459,12 +459,15 @@ These talk to a container's `{id}dev` / Automation endpoints — not the Cosmo A
 | `bc_dev_publish_artifact` | Download `.app` / zip from HTTPS, Azure DevOps build artifact, or GitHub Actions artifact/release; publish in dependency order |
 | `bc_dev_uninstall_app` | Automation API `Microsoft.NAV.uninstall` (**not** `DELETE /dev/apps`) |
 | `bc_dev_unpublish_app` | Automation API `Microsoft.NAV.unpublish` (BC 25.4+; uninstall first) |
+| `bc_dev_run_tests` | Run AL unit tests via **Cosmo SSH** (`Invoke-NavContainerTests` / `Run-TestsInBcContainer` / `Run-AlTests`) when `cosmo_ssh_info.available=true`; structured passed/failed/skipped + failure messages |
 
 **`developerBaseUrl`:** set optional `developerBaseUrl` on `devConnection`, or derive it from on-prem `baseUrl` by replacing a trailing `rest` with `dev` (Alpaca: `…/f0a4d51d4d47rest` → `…/f0a4d51d4d47dev`). After `cosmo_get_container`, wire the derived `restBaseUrl` / `developerBaseUrl` into `devConnection` (company typically CRONUS IS). Verified publish path on Cosmo Alpaca: multipart `/dev/apps` → HTTP 200.
 
 **Uninstall / unpublish:** prefer Automation API (`bc_dev_uninstall_app` / `bc_dev_unpublish_app`). If those fail or the container only allows SSH ops, use `cosmo_ssh_info` then `Uninstall-NavApp` / `Unpublish-NavApp` over SSH.
 
-**Follow-up (out of scope here):** `alc` compile orchestration and a full AL test runner.
+**`bc_dev_run_tests`:** prefers Cosmo SSH (`GET /Container/Ssh/{id}`). When `available=true`, SSH as `sshuser` with `privateKey` and run `Invoke-NavContainerTests` / `Run-TestsInBcContainer` / `Run-AlTests`. When `available=false`, returns a **blocked** error (no silent fallback) with Stop→Start recreate + `cosmo_create_container`/`sshEnabled=true` hints — patching `sshEnabled` alone often leaves SSH unavailable. Cosmo OpenAPI has **no** `/Container/Exec/{id}/…` test-runner endpoint (only `deployApp`, `appinfo`, `restartServerInstance`, `backup`, `dllCollection`, `eventlog`, `prepareForBaseApp`). `mode=helper` is local-docker only (`containerName`). Reuses stdio/`devConnection` NavUserPassword credentials. Returns structured counts + failure messages (truncated previews, not megabyte dumps).
+
+**Follow-up (out of scope here):** `alc` compile orchestration.
 
 ### Cosmo Alpaca (`cosmo_*`)
 
@@ -533,6 +536,7 @@ Public container host (for `{id}rest` / `{id}dev`) remains
 | Install app from NuGet / Azure DevOps **feed** | `cosmo_deploy_app` |
 | Publish local `.app`, GitHub Actions / ADO / HTTPS artifact | `bc_dev_publish_app` / `bc_dev_publish_artifact` |
 | Uninstall / unpublish | `bc_dev_uninstall_app` / `bc_dev_unpublish_app` first; SSH `Uninstall-NavApp` / `Unpublish-NavApp` via `cosmo_ssh_info` if needed |
+| AL unit tests | `bc_dev_run_tests` (SSH when available; blocked with recreate hint otherwise). Cosmo has no Exec test-runner API. |
 
 #### Ephemeral Cosmo loop (policy)
 
