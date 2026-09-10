@@ -46,6 +46,23 @@ class ClientContext {
         $jsonClient = New-Object Microsoft.Dynamics.Framework.UI.Client.JsonHttpClient -ArgumentList $this.addressUri, $credential, $authenticationScheme
         $httpClient = ($jsonClient.GetType().GetField("httpClient", [Reflection.BindingFlags]::NonPublic -bor [Reflection.BindingFlags]::Instance)).GetValue($jsonClient)
         $httpClient.Timeout = $interactionTimeout
+        # Prefer trusting the container's own BC certificate (Cosmo writes C:\Run\certificate.cer).
+        foreach ($cer in @('C:\Run\certificate.cer', 'C:\Run\my\certificate.cer')) {
+            if (Test-Path $cer) {
+                try {
+                    Import-Certificate -FilePath $cer -CertStoreLocation Cert:\LocalMachine\Root -ErrorAction Stop | Out-Null
+                    Write-Host "[MCP] Imported $cer into LocalMachine\Root"
+                } catch {
+                    try {
+                        Import-Certificate -FilePath $cer -CertStoreLocation Cert:\CurrentUser\Root -ErrorAction Stop | Out-Null
+                        Write-Host "[MCP] Imported $cer into CurrentUser\Root"
+                    } catch {
+                        Write-Host "[MCP] Import-Certificate $cer failed: $($_.Exception.Message)"
+                    }
+                }
+                break
+            }
+        }
         # Cosmo / container self-signed HTTPS: JsonHttpClient uses System.Net.Http.HttpClient.
         # ServicePointManager callbacks do not cover that stack under pwsh (.NET). Trust here before OpenSession.
         try {
@@ -59,26 +76,36 @@ class ClientContext {
                 }
                 if ($handler) { break }
             }
-            if ($handler) {
+            # JsonHttpClient wraps HttpClientHandler in BasicAuthHandler (DelegatingHandler) — walk InnerHandler.
+            $depth = 0
+            while ($handler -and $depth -lt 8) {
+                $depth++
+                $typeName = $handler.GetType().FullName
                 if ($handler | Get-Member -Name ServerCertificateCustomValidationCallback -ErrorAction SilentlyContinue) {
-                    $handler.ServerCertificateCustomValidationCallback = { $true }
-                    Write-Host '[MCP] HttpClientHandler ServerCertificateCustomValidationCallback=trust-any'
+                    $handler.ServerCertificateCustomValidationCallback = [System.Net.Http.HttpClientHandler]::DangerousAcceptAnyServerCertificateValidator
+                    Write-Host "[MCP] SSL trust-any on $typeName (depth=$depth)"
+                    break
                 }
-                elseif ($handler | Get-Member -Name SslOptions -ErrorAction SilentlyContinue) {
+                if ($handler | Get-Member -Name SslOptions -ErrorAction SilentlyContinue) {
                     $handler.SslOptions.RemoteCertificateValidationCallback = { $true }
-                    Write-Host '[MCP] SocketsHttpHandler SslOptions callback=trust-any'
+                    Write-Host "[MCP] SSL trust-any via SslOptions on $typeName (depth=$depth)"
+                    break
                 }
-                else {
-                    Write-Host "[MCP] HttpClient handler type $($handler.GetType().FullName) has no known cert callback"
+                if ($handler | Get-Member -Name InnerHandler -ErrorAction SilentlyContinue) {
+                    Write-Host "[MCP] Walking InnerHandler from $typeName"
+                    $handler = $handler.InnerHandler
+                    continue
                 }
+                Write-Host "[MCP] HttpClient handler $typeName has no cert callback / InnerHandler"
+                break
             }
-            else {
+            if (-not $handler) {
                 Write-Host '[MCP] Could not reflect HttpClient handler for SSL trust'
             }
         } catch {
             Write-Host "[MCP] HttpClient SSL trust patch skipped: $($_.Exception.Message)"
         }
-        $this.clientSession = New-Object Microsoft.Dynamics.Framework.UI.Client.ClientSession -ArgumentList $jsonClient, (New-Object Microsoft.Dynamics.Framework.UI.Client.NonDispatcher), (New-Object 'Microsoft.Dynamics.Framework.UI.Client.TimerFactory[Microsoft.Dynamics.Framework.UI.Client.TaskTimer]')
+                $this.clientSession = New-Object Microsoft.Dynamics.Framework.UI.Client.ClientSession -ArgumentList $jsonClient, (New-Object Microsoft.Dynamics.Framework.UI.Client.NonDispatcher), (New-Object 'Microsoft.Dynamics.Framework.UI.Client.TimerFactory[Microsoft.Dynamics.Framework.UI.Client.TaskTimer]')
         $this.culture = $culture
         if ($timezone -eq '') {
             $tz = Get-TimeZone
