@@ -46,6 +46,38 @@ class ClientContext {
         $jsonClient = New-Object Microsoft.Dynamics.Framework.UI.Client.JsonHttpClient -ArgumentList $this.addressUri, $credential, $authenticationScheme
         $httpClient = ($jsonClient.GetType().GetField("httpClient", [Reflection.BindingFlags]::NonPublic -bor [Reflection.BindingFlags]::Instance)).GetValue($jsonClient)
         $httpClient.Timeout = $interactionTimeout
+        # Cosmo / container self-signed HTTPS: JsonHttpClient uses System.Net.Http.HttpClient.
+        # ServicePointManager callbacks do not cover that stack under pwsh (.NET). Trust here before OpenSession.
+        try {
+            $flags = [Reflection.BindingFlags]::NonPublic -bor [Reflection.BindingFlags]::Instance
+            $handler = $null
+            foreach ($type in @($httpClient.GetType(), $httpClient.GetType().BaseType)) {
+                if (-not $type) { continue }
+                foreach ($name in @('_handler', 'handler', '_messageHandler')) {
+                    $field = $type.GetField($name, $flags)
+                    if ($field) { $handler = $field.GetValue($httpClient); break }
+                }
+                if ($handler) { break }
+            }
+            if ($handler) {
+                if ($handler | Get-Member -Name ServerCertificateCustomValidationCallback -ErrorAction SilentlyContinue) {
+                    $handler.ServerCertificateCustomValidationCallback = { $true }
+                    Write-Host '[MCP] HttpClientHandler ServerCertificateCustomValidationCallback=trust-any'
+                }
+                elseif ($handler | Get-Member -Name SslOptions -ErrorAction SilentlyContinue) {
+                    $handler.SslOptions.RemoteCertificateValidationCallback = { $true }
+                    Write-Host '[MCP] SocketsHttpHandler SslOptions callback=trust-any'
+                }
+                else {
+                    Write-Host "[MCP] HttpClient handler type $($handler.GetType().FullName) has no known cert callback"
+                }
+            }
+            else {
+                Write-Host '[MCP] Could not reflect HttpClient handler for SSL trust'
+            }
+        } catch {
+            Write-Host "[MCP] HttpClient SSL trust patch skipped: $($_.Exception.Message)"
+        }
         $this.clientSession = New-Object Microsoft.Dynamics.Framework.UI.Client.ClientSession -ArgumentList $jsonClient, (New-Object Microsoft.Dynamics.Framework.UI.Client.NonDispatcher), (New-Object 'Microsoft.Dynamics.Framework.UI.Client.TimerFactory[Microsoft.Dynamics.Framework.UI.Client.TaskTimer]')
         $this.culture = $culture
         if ($timezone -eq '') {
