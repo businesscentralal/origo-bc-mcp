@@ -491,9 +491,10 @@ export function registerDevServicesTools(server) {
     server.registerTool("bc_dev_run_tests", {
         title: "Run AL unit tests (Cosmo SSH / BcContainerHelper)",
         description: "Runs AL unit tests against the connected container. " +
-            "Preferred: Cosmo SSH when cosmo_ssh_info.available=true — SSH as sshuser with privateKey and " +
-            "invoke Invoke-NavContainerTests / Run-TestsInBcContainer / Run-AlTests on the remote host. " +
-            "If SSH available=false: returns a clear blocked error (no silent fallback) with Stop→Start " +
+            "Preferred: Cosmo SSH when cosmo_ssh_info has ipAddress+privateKey (available flag ignored — " +
+            "available=false during Starting is OK). SSH as sshuser with privateKey (never logged) and " +
+            "invoke Invoke-NavContainerTests / Run-TestsInBcContainer / Run-AlTests; brief retries on connect fail. " +
+            "If ip/key missing: clear blocked error (no silent fallback) with Stop→Start " +
             "recreate + create-with-sshEnabled=true hints. " +
             "Cosmo has no /Container/Exec/{id} test-runner endpoint (only deployApp/appinfo/restartServerInstance/…). " +
             "mode=helper is local-docker only (containerName). Reuses stdio/devConnection NavUserPassword auth. " +

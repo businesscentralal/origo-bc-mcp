@@ -1,12 +1,17 @@
 /**
  * bc_dev_run_tests — run AL unit tests against a connected BC container.
  *
- * Preferred path (Cosmo): GET /Container/Ssh/{id}; when available=true, SSH as
- * sshuser with privateKey and invoke Invoke-NavContainerTests /
- * Run-TestsInBcContainer / Run-AlTests on the remote host.
+ * Preferred path (Cosmo): GET /Container/Ssh/{id}; SSH is usable when
+ * ipAddress AND privateKey are present (do NOT require available===true —
+ * available=false is expected while the container is Starting after Stop→Start).
+ * SSH as sshuser with privateKey; scp local run-tests.ps1 to a remote temp path,
+ * then `pwsh -NoProfile -File <remote>` (fallback: powershell.exe -File).
+ * Do NOT pipe the script on stdin to `pwsh -Command -` (Cosmo Windows aborts
+ * after the first Write-Host). Never log/echo the privateKey.
  *
- * When SSH available=false: return a clear error (do NOT silently fall back) with
- * Stop→Start recreate + create-with-sshEnabled=true hints.
+ * When ip/key missing: return a clear error (do NOT silently fall back) with
+ * Stop→Start recreate + create-with-sshEnabled=true hints. Retry briefly on
+ * connect failure while the container is still Starting.
  *
  * Cosmo OpenAPI (Alpaca release) has NO /Container/Exec/{id}/… test runner —
  * only deployApp, appinfo, restartServerInstance, backup, dllCollection,
@@ -16,14 +21,15 @@ import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync, } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { randomBytes } from "node:crypto";
 import { cosmoRequest } from "../cosmo/client.js";
 const COSMO_EXEC_TEST_NOTE = "Cosmo Alpaca OpenAPI has no /Container/Exec/{id} test-runner endpoint " +
     "(only deployApp, appinfo, restartServerInstance, backup, dllCollection, eventlog, prepareForBaseApp). " +
     "AL unit tests require SSH (Invoke-NavContainerTests / Run-TestsInBcContainer / Run-AlTests).";
-const SSH_UNAVAILABLE_HINT = "Cosmo SSH is not available on this container (cosmo_ssh_info.available=false). " +
-    "Patching sshEnabled=true on a running container is often not enough. Recreate SSH by: " +
-    "(1) cosmo_update_container state=Stop, then state=Start (or delete + cosmo_create_container with sshEnabled=true), " +
-    "(2) re-check cosmo_ssh_info until available=true and privateKey is present, " +
+const SSH_UNAVAILABLE_HINT = "Cosmo SSH credentials missing (need ipAddress + privateKey from cosmo_ssh_info). " +
+    "Note: available=false during Starting is normal after Stop→Start — usable SSH is keyed off ip+privateKey, not available===true. " +
+    "If both are absent: (1) cosmo_update_container state=Stop, then state=Start (or delete + cosmo_create_container with sshEnabled=true), " +
+    "(2) re-check cosmo_ssh_info until ipAddress and privateKey are present, " +
     "(3) retry bc_dev_run_tests. Standing bc28-is-grok may need a fresh create-with-sshEnabled=true. " +
     COSMO_EXEC_TEST_NOTE;
 function truncate(s, max = 8000) {
@@ -206,6 +212,42 @@ function extractJunitFromStdout(stdout) {
     const m = stdout.match(/\[MCP_JUNIT_BEGIN\]\r?\n([\s\S]*?)\r?\n\[MCP_JUNIT_END\]/);
     return m?.[1];
 }
+/** Shared OpenSSH client options (never includes privateKey material). */
+export function sshClientOpts(keyPath, port) {
+    return [
+        "-i",
+        keyPath,
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "ConnectTimeout=8",
+        "-p",
+        port,
+    ];
+}
+/** Remote temp path for the uploaded run-tests.ps1 (Windows Cosmo host). */
+export function remoteRunTestsPath(id) {
+    const name = `origo-bc-run-tests-${id}.ps1`;
+    return {
+        winPath: `C:\\Windows\\Temp\\${name}`,
+        // scp on OpenSSH for Windows accepts forward-slash destinations reliably
+        scpPath: `C:/Windows/Temp/${name}`,
+    };
+}
+function looksLikeMissingShell(shell, stdout, stderr, exitCode) {
+    const blob = `${stdout}\n${stderr}`;
+    if (exitCode === 127)
+        return true;
+    const re = new RegExp(`(?:${shell}.*(?:not (?:found|recognized)|No such file|CommandNotFoundException)|` +
+        `'${shell}' is not recognized|The term '${shell}' is not recognized)`, "i");
+    return re.test(blob);
+}
 async function runViaSsh(input, conn, ssh) {
     if (!ssh.ipAddress || !ssh.privateKey) {
         return {
@@ -215,7 +257,7 @@ async function runViaSsh(input, conn, ssh) {
             durationMs: 0,
             ssh: { available: ssh.available, ipAddress: ssh.ipAddress, port: ssh.port, httpStatus: ssh.httpStatus },
             cosmoExecTestEndpoint: "none",
-            error: "cosmo_ssh_info.available=true but ipAddress/privateKey missing. Keys: " +
+            error: "cosmo_ssh_info missing ipAddress and/or privateKey (required for SSH). Keys: " +
                 ssh.rawKeys.join(", "),
             hint: SSH_UNAVAILABLE_HINT,
         };
@@ -239,12 +281,17 @@ async function runViaSsh(input, conn, ssh) {
     const port = ssh.port || "22";
     const timeoutMs = input.timeoutMs ?? 15 * 60 * 1000;
     const target = `${user}@${ssh.ipAddress}`;
-    const commandPreview = `ssh -i <key> -p ${port} ${target} pwsh -NoProfile -File -  # extensionId=${input.extensionId ?? ""}`;
-    // Pipe remote script on stdin to pwsh over SSH (OpenSSH).
-    const sshArgs = [
+    const remoteId = randomBytes(8).toString("hex");
+    const { winPath: remoteWinPath, scpPath: remoteScpPath } = remoteRunTestsPath(remoteId);
+    const commandPreview = `scp -i <key> -P ${port} run-tests.ps1 ${target}:${remoteScpPath} && ` +
+        `ssh -i <key> -p ${port} ${target} pwsh|powershell -NoProfile -File ${remoteWinPath}` +
+        `  # extensionId=${input.extensionId ?? ""}`;
+    const sshOpts = sshClientOpts(keyPath, port);
+    // scp uses -P for port; strip ssh's -p and rebuild
+    const scpOpts = [
         "-i",
         keyPath,
-        "-p",
+        "-P",
         port,
         "-o",
         "StrictHostKeyChecking=no",
@@ -254,57 +301,59 @@ async function runViaSsh(input, conn, ssh) {
         "BatchMode=yes",
         "-o",
         "IdentitiesOnly=yes",
-        target,
-        "pwsh",
-        "-NoProfile",
-        "-Command",
-        "-",
+        "-o",
+        "ConnectTimeout=8",
     ];
-    const start = Date.now();
-    const proc = await new Promise((resolve) => {
-        const child = spawn("ssh", sshArgs, {
-            env: process.env,
-            windowsHide: true,
-        });
-        let stdout = "";
-        let stderr = "";
-        const timer = setTimeout(() => {
-            try {
-                child.kill("SIGTERM");
-            }
-            catch {
-                /* ignore */
-            }
-            stderr += `\n[MCP] timed out after ${timeoutMs}ms\n`;
-        }, timeoutMs);
-        child.stdout?.on("data", (b) => {
-            stdout += b.toString("utf8");
-        });
-        child.stderr?.on("data", (b) => {
-            stderr += b.toString("utf8");
-        });
-        child.on("close", (code) => {
-            clearTimeout(timer);
-            resolve({ exitCode: code, stdout, stderr, durationMs: Date.now() - start });
-        });
-        child.on("error", (err) => {
-            clearTimeout(timer);
-            resolve({
-                exitCode: 1,
-                stdout,
-                stderr: `${stderr}\n${err.message}`,
-                durationMs: Date.now() - start,
-            });
-        });
-        child.stdin?.write(remoteScript);
-        child.stdin?.end();
+    const wipeLocal = () => {
+        try {
+            rmSync(dir, { recursive: true, force: true });
+        }
+        catch {
+            /* ignore — key material best-effort wipe */
+        }
+    };
+    const scpTimeout = Math.min(timeoutMs, 60_000);
+    const scpProc = await runProcess("scp", [...scpOpts, scriptPath, `${target}:${remoteScpPath}`], { timeoutMs: scpTimeout });
+    if (scpProc.exitCode !== 0) {
+        wipeLocal();
+        return {
+            ok: false,
+            mode: "ssh",
+            exitCode: scpProc.exitCode,
+            durationMs: scpProc.durationMs,
+            ssh: {
+                available: ssh.available,
+                ipAddress: ssh.ipAddress,
+                port,
+                httpStatus: ssh.httpStatus,
+            },
+            cosmoExecTestEndpoint: "none",
+            stdoutPreview: truncate(scpProc.stdout),
+            stderrPreview: truncate(scpProc.stderr),
+            commandPreview,
+            error: "scp of run-tests.ps1 to Cosmo SSH host failed",
+            hint: "Ensure OpenSSH scp works to the container (ip+privateKey), then retry. " +
+                "Do not pipe scripts via pwsh -Command - over SSH on Cosmo Windows hosts.",
+        };
+    }
+    const invokeRemote = (shell) => runProcess("ssh", [...sshOpts, target, shell, "-NoProfile", "-File", remoteWinPath], {
+        timeoutMs,
     });
+    let proc = await invokeRemote("pwsh");
+    let shellUsed = "pwsh";
+    if (looksLikeMissingShell("pwsh", proc.stdout, proc.stderr, proc.exitCode)) {
+        proc = await invokeRemote("powershell.exe");
+        shellUsed = "powershell.exe";
+    }
+    // Best-effort remote delete of uploaded script (never log key).
+    const delPs = `Remove-Item -LiteralPath '${remoteWinPath.replace(/'/g, "''")}' -Force -ErrorAction SilentlyContinue`;
     try {
-        rmSync(dir, { recursive: true, force: true });
+        await runProcess("ssh", [...sshOpts, target, "powershell.exe", "-NoProfile", "-Command", delPs], { timeoutMs: 15_000 });
     }
     catch {
-        /* ignore — key material best-effort wipe */
+        /* ignore */
     }
+    wipeLocal();
     const junitXml = extractJunitFromStdout(proc.stdout);
     let passed;
     let failed;
@@ -344,7 +393,7 @@ async function runViaSsh(input, conn, ssh) {
         },
         cosmoExecTestEndpoint: "none",
         stdoutPreview: truncate(proc.stdout),
-        stderrPreview: truncate(proc.stderr),
+        stderrPreview: truncate((shellUsed !== "pwsh" ? `[MCP] remote shell=${shellUsed}\n` : "") + proc.stderr),
         commandPreview,
         hint: proc.exitCode === 0
             ? undefined
@@ -438,6 +487,11 @@ async function runHelperLocal(input, conn) {
         commandPreview: `${pwsh} -File run-tests.ps1 # containerName=${containerName}`,
     };
 }
+export function sshUsable(ssh) {
+    // Architect: after Stop→Start, available may stay false while Starting even when
+    // ipAddress + RSA privateKey are already present. Gate on credentials, not available.
+    return Boolean(ssh.ipAddress?.trim() && ssh.privateKey?.trim());
+}
 function sshBlockedResult(ssh) {
     return {
         ok: false,
@@ -445,13 +499,14 @@ function sshBlockedResult(ssh) {
         exitCode: 1,
         durationMs: 0,
         ssh: {
-            available: false,
+            available: ssh.available,
             ipAddress: ssh.ipAddress,
             port: ssh.port,
             httpStatus: ssh.httpStatus,
         },
         cosmoExecTestEndpoint: "none",
-        error: "Cosmo SSH unavailable (available=false) — refusing to silently fall back.",
+        error: "Cosmo SSH unusable — ipAddress and privateKey required (available flag ignored). " +
+            `available=${ssh.available}; hasIp=${Boolean(ssh.ipAddress)}; hasKey=${Boolean(ssh.privateKey)}.`,
         hint: SSH_UNAVAILABLE_HINT,
     };
 }
@@ -487,9 +542,33 @@ export async function runBcTests(input, conn) {
             hint: SSH_UNAVAILABLE_HINT,
         };
     }
-    if (ssh.httpStatus >= 400 || !ssh.available) {
+    if (ssh.httpStatus >= 400 || !sshUsable(ssh)) {
         return sshBlockedResult(ssh);
     }
-    return runViaSsh(input, conn, ssh);
+    // Retry SSH connect briefly — container may still be Starting after Stop→Start.
+    const attempts = Math.max(1, Number(process.env.BC_DEV_SSH_RETRIES || 4));
+    const delayMs = Math.max(0, Number(process.env.BC_DEV_SSH_RETRY_MS || 8000));
+    let last;
+    for (let i = 0; i < attempts; i++) {
+        last = await runViaSsh(input, conn, ssh);
+        if (last.ok)
+            return last;
+        const connectFail = /Connection refused|Connection timed out|No route to host|Connection reset|Permission denied|timed out after/i.test(`${last.stderrPreview || ""}
+${last.stdoutPreview || ""}
+${last.error || ""}`);
+        if (!connectFail || i === attempts - 1)
+            return last;
+        await new Promise((r) => setTimeout(r, delayMs));
+        // Refresh SSH info in case port/ip rotated while Starting
+        try {
+            ssh = await fetchCosmoSshInfo(containerId);
+            if (!sshUsable(ssh))
+                return sshBlockedResult(ssh);
+        }
+        catch {
+            /* keep prior ssh */
+        }
+    }
+    return last;
 }
 //# sourceMappingURL=runTests.js.map
