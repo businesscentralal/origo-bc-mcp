@@ -66,7 +66,17 @@ async function resolveArtifactDownload(input) {
         }
         if (process.env.GITHUB_TOKEN && /github\.com|api\.github\.com/i.test(input.url)) {
             headers.Authorization = `Bearer ${process.env.GITHUB_TOKEN}`;
-            headers.Accept = "application/octet-stream";
+            // Actions artifact /zip rejects application/octet-stream (HTTP 415).
+            // Release asset API URLs need octet-stream; Actions artifacts need vnd.github+json.
+            if (/\/actions\/artifacts\/\d+\/zip/i.test(input.url)) {
+                headers.Accept = "application/vnd.github+json";
+            }
+            else if (/api\.github\.com/i.test(input.url)) {
+                headers.Accept = "application/octet-stream";
+            }
+            else {
+                headers.Accept = "*/*";
+            }
         }
         const name = basename(new URL(input.url).pathname) || `artifact-${randomUUID()}`;
         return { downloadUrl: input.url, headers, suggestedName: name };
@@ -105,12 +115,13 @@ async function resolveArtifactDownload(input) {
         if (ghToken)
             headers.Authorization = `Bearer ${ghToken}`;
         if (artifactId) {
-            // Actions artifact archive
+            // Actions artifact archive — Accept must be vnd.github+json (octet-stream → HTTP 415).
+            // fetch follows the redirect to the zip body.
             const downloadUrl = `https://api.github.com/repos/${encodeURIComponent(owner)}/${encodeURIComponent(repo)}` +
                 `/actions/artifacts/${encodeURIComponent(String(artifactId))}/zip`;
             return {
                 downloadUrl,
-                headers: { ...headers, Accept: "application/octet-stream" },
+                headers: { ...headers, Accept: "application/vnd.github+json" },
                 suggestedName: `gh-artifact-${artifactId}.zip`,
             };
         }

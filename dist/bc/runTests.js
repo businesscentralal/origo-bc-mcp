@@ -81,20 +81,55 @@ export function parseJunit(xml) {
     const passed = Math.max(0, tests - failed - skippedN);
     return { passed, failed, skipped: skippedN, errors: errorsN, failures: failures.slice(0, 50) };
 }
+/** Known AL test-tool page / codeunit ids — never treat as failure counts. */
+const KNOWN_TEST_TOOL_IDS = new Set([
+    "130455",
+    "130202",
+    "130203",
+    "130409",
+    "130201",
+]);
+function isBareTestToolId(s) {
+    return KNOWN_TEST_TOOL_IDS.has(s.trim());
+}
 /** Parse BcContainerHelper / AL test console lines into counts + failure messages. */
 export function parseConsoleSummary(text) {
     const failures = [];
-    const failLine = /(?:Failed|Error)\s*[:\-]\s*(.+?)(?:\r?\n|$)/gi;
-    let m;
-    while ((m = failLine.exec(text)) !== null && failures.length < 50) {
-        failures.push({ name: m[1].trim().slice(0, 200), message: m[1].trim().slice(0, 500) });
+    for (const line of text.split(/\r?\n/)) {
+        // MCP diagnostics like "[MCP] testPage 130455 failed: ..." are not test failures.
+        if (/\[MCP\].*\btestPage\b/i.test(line))
+            continue;
+        const m = /(?:^|[\s])(?:Failed|Error)\s*[:\-]\s*(.+?)$/i.exec(line);
+        if (!m)
+            continue;
+        const raw = m[1].trim();
+        if (!raw || isBareTestToolId(raw))
+            continue;
+        // "Failed: 1" summary lines are counts, not named failures
+        if (/^\d+$/.test(raw))
+            continue;
+        failures.push({ name: raw.slice(0, 200), message: raw.slice(0, 500) });
+        if (failures.length >= 50)
+            break;
     }
     const passed = Number(text.match(/\bPassed\s*[:=]\s*(\d+)/i)?.[1]) ||
         Number(text.match(/\b(\d+)\s+passed\b/i)?.[1]) ||
         undefined;
-    const failed = Number(text.match(/\bFailed\s*[:=]\s*(\d+)/i)?.[1]) ||
-        Number(text.match(/\b(\d+)\s+failed\b/i)?.[1]) ||
-        (failures.length || undefined);
+    const failedExplicit = Number(text.match(/\bFailed\s*[:=]\s*(\d+)/i)?.[1]) || undefined;
+    // Avoid "testPage 130455 failed" → failed=130455 via \b(\d+)\s+failed\b
+    let failedLoose;
+    const looseRe = /\b(\d+)\s+failed\b/gi;
+    let lm;
+    while ((lm = looseRe.exec(text)) !== null) {
+        const n = Number(lm[1]);
+        const id = String(lm[1]);
+        if (KNOWN_TEST_TOOL_IDS.has(id) || n >= 10_000)
+            continue;
+        // Prefer a count that appears as a summary, not a page id
+        failedLoose = n;
+        break;
+    }
+    const failed = failedExplicit || failedLoose || (failures.length || undefined);
     const skipped = Number(text.match(/\bSkipped\s*[:=]\s*(\d+)/i)?.[1]) ||
         Number(text.match(/\b(\d+)\s+skipped\b/i)?.[1]) ||
         undefined;
@@ -314,44 +349,83 @@ export function buildRemoteTestScript(input, conn, opts) {
         `    $authType = $customConfig.SelectSingleNode("//appSettings/add[@key='ClientServicesCredentialType']").Value`,
         `    if (-not $authType) { $authType = 'NavUserPassword' }`,
         `    $uri = [Uri]::new($publicWebBaseUrl)`,
-        `    $serviceUrl = "$($uri.Scheme)://localhost:$($uri.Port)$($uri.PathAndQuery)/cs?tenant=$tenant"`,
-        `    if ($companyName) { $serviceUrl += "&company=$([Uri]::EscapeDataString($companyName))" }`,
-        `    Write-Host "[MCP] Client Services URL: $serviceUrl (auth=$authType)"`,
+        `    $csPortNode = $customConfig.SelectSingleNode("//appSettings/add[@key='ClientServicesPort']")`,
+        `    $csPort = if ($csPortNode -and $csPortNode.Value) { $csPortNode.Value } else { $uri.Port }`,
+        `    $pathBase = $uri.AbsolutePath.TrimEnd('/')`,
+        `    # Prefer https://localhost (Cosmo usessl=y) after trust-any; also try without company query.`,
+        `    $serviceUrls = New-Object System.Collections.Generic.List[string]`,
+        `    $httpsWithCompany = "https://localhost:$($uri.Port)$pathBase/cs?tenant=$tenant"`,
+        `    if ($companyName) { $httpsWithCompany += "&company=$([Uri]::EscapeDataString($companyName))" }`,
+        `    [void]$serviceUrls.Add($httpsWithCompany)`,
+        `    $httpsNoCompany = "https://localhost:$($uri.Port)$pathBase/cs?tenant=$tenant"`,
+        `    if ($httpsNoCompany -ne $httpsWithCompany) { [void]$serviceUrls.Add($httpsNoCompany) }`,
+        `    if ($uri.Scheme -eq 'https' -or [int]$csPort -ne [int]$uri.Port) {`,
+        `      $httpAlt = "http://localhost:$csPort$pathBase/cs?tenant=$tenant"`,
+        `      if ($companyName) { $httpAlt += "&company=$([Uri]::EscapeDataString($companyName))" }`,
+        `      if (-not $serviceUrls.Contains($httpAlt)) { [void]$serviceUrls.Add($httpAlt) }`,
+        `    }`,
+        `    Write-Host "[MCP] Client Services URL candidates (auth=$authType): $($serviceUrls -join ' | ')"`,
         `    . $scripts.Ps -newtonSoftDllPath $newton -clientDllPath $clientDll -clientContextScriptPath $scripts.Cc`,
+        `    # Always trust localhost / Cosmo self-signed certs for this process.`,
+        `    # Disable-SslVerification may be missing when only vendored PsTest is present (no full BcContainerHelper module).`,
+        `    Write-Host '[MCP] Enabling process-level SSL trust-any (ServicePointManager + CertificatePolicy)'`,
+        `    [Net.ServicePointManager]::SecurityProtocol = [Net.SecurityProtocolType]::Tls12`,
+        `    [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }`,
+        `    try {`,
+        `      if (-not ([System.Management.Automation.PSTypeName]'McpTrustAll').Type) {`,
+        `        Add-Type @'`,
+        `using System.Net;`,
+        `using System.Security.Cryptography.X509Certificates;`,
+        `public class McpTrustAll : ICertificatePolicy {`,
+        `  public bool CheckValidationResult(ServicePoint s, X509Certificate c, WebRequest r, int p) { return true; }`,
+        `}`,
+        `'@`,
+        `      }`,
+        `      [Net.ServicePointManager]::CertificatePolicy = New-Object McpTrustAll`,
+        `    } catch {`,
+        `      Write-Host "[MCP] CertificatePolicy trust-all skipped: $($_.Exception.Message)"`,
+        `    }`,
+        `    if (Get-Command Disable-SslVerification -ErrorAction SilentlyContinue) {`,
+        `      try { Disable-SslVerification } catch { }`,
+        `    }`,
         `    $pagesToTry = @(130455, 130202, 130203, 130409)`,
         `    $interactionTimeout = [timespan]::FromMinutes(10)`,
-        `    foreach ($testPage in $pagesToTry) {`,
-        `      $clientContext = $null`,
-        `      try {`,
-        `        Write-Host "[MCP] New-ClientContext + Run-Tests testPage=$testPage"`,
-        `        if (Get-Command Disable-SslVerification -ErrorAction SilentlyContinue) { Disable-SslVerification }`,
-        `        $clientContext = New-ClientContext -serviceUrl $serviceUrl -auth $authType -credential $cred -interactionTimeout $interactionTimeout -culture 'en-US'`,
-        `        $rtParams = @{`,
-        `          clientContext = $clientContext`,
-        `          TestSuite = $testSuite`,
-        `          detailed = $true`,
-        `          testPage = $testPage`,
-        `          JUnitResultFileName = $junit`,
-        `        }`,
-        `        if ($extensionId) { $rtParams.ExtensionId = $extensionId }`,
-        `        if ($testCodeunit) { $rtParams.TestCodeunit = $testCodeunit }`,
-        `        if ($testFunction) { $rtParams.TestFunction = $testFunction }`,
-        `        $allPassed = Run-Tests @rtParams`,
-        `        $clientServicesOk = $true`,
-        `        if (Test-Path $junit) { Write-Host "[MCP_JUNIT_BEGIN]"; Get-Content -Raw $junit; Write-Host "[MCP_JUNIT_END]" }`,
-        `        if ($allPassed -eq $false) { Write-Host '[MCP] Some tests failed'; exit 2 }`,
-        `        Write-Host '[MCP] Tests finished (Client Services / PsTestFunctions)'; exit 0`,
-        `      } catch {`,
-        `        $lastCsError = $_.Exception.Message`,
-        `        Write-Host "[MCP] testPage $testPage failed: $lastCsError"`,
-        `        if ($_.ScriptStackTrace) { Write-Host $_.ScriptStackTrace }`,
-        `      } finally {`,
-        `        if ($clientContext -and (Get-Command Remove-ClientContext -ErrorAction SilentlyContinue)) {`,
-        `          try { Remove-ClientContext -clientContext $clientContext } catch { }`,
-        `        }`,
-        `        if (Get-Command Enable-SslVerification -ErrorAction SilentlyContinue) { Enable-SslVerification }`,
-        `      }`,
+        `    foreach ($serviceUrl in $serviceUrls) {`,
         `      if ($clientServicesOk) { break }`,
+        `      Write-Host "[MCP] Trying Client Services URL: $serviceUrl"`,
+        `      foreach ($testPage in $pagesToTry) {`,
+        `        $clientContext = $null`,
+        `        try {`,
+        `          Write-Host "[MCP] New-ClientContext + Run-Tests testPage=$testPage"`,
+        `          [Net.ServicePointManager]::ServerCertificateValidationCallback = { $true }`,
+        `          if (Get-Command Disable-SslVerification -ErrorAction SilentlyContinue) { try { Disable-SslVerification } catch { } }`,
+        `          $clientContext = New-ClientContext -serviceUrl $serviceUrl -auth $authType -credential $cred -interactionTimeout $interactionTimeout -culture 'en-US'`,
+        `          $rtParams = @{`,
+        `            clientContext = $clientContext`,
+        `            TestSuite = $testSuite`,
+        `            detailed = $true`,
+        `            testPage = $testPage`,
+        `            JUnitResultFileName = $junit`,
+        `          }`,
+        `          if ($extensionId) { $rtParams.ExtensionId = $extensionId }`,
+        `          if ($testCodeunit) { $rtParams.TestCodeunit = $testCodeunit }`,
+        `          if ($testFunction) { $rtParams.TestFunction = $testFunction }`,
+        `          $allPassed = Run-Tests @rtParams`,
+        `          $clientServicesOk = $true`,
+        `          if (Test-Path $junit) { Write-Host "[MCP_JUNIT_BEGIN]"; Get-Content -Raw $junit; Write-Host "[MCP_JUNIT_END]" }`,
+        `          if ($allPassed -eq $false) { Write-Host '[MCP] Some tests failed'; exit 2 }`,
+        `          Write-Host '[MCP] Tests finished (Client Services / PsTestFunctions)'; exit 0`,
+        `        } catch {`,
+        `          $lastCsError = $_.Exception.Message`,
+        `          Write-Host "[MCP] testPage $testPage failed: $lastCsError"`,
+        `          if ($_.ScriptStackTrace) { Write-Host $_.ScriptStackTrace }`,
+        `        } finally {`,
+        `          if ($clientContext -and (Get-Command Remove-ClientContext -ErrorAction SilentlyContinue)) {`,
+        `            try { Remove-ClientContext -clientContext $clientContext } catch { }`,
+        `          }`,
+        `        }`,
+        `        if ($clientServicesOk) { break }`,
+        `      }`,
         `    }`,
         `  } catch {`,
         `    $lastCsError = $_.Exception.Message`,
