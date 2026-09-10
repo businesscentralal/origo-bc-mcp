@@ -459,13 +459,22 @@ These talk to a container's `{id}dev` / Automation endpoints — not the Cosmo A
 | `bc_dev_publish_artifact` | Download `.app` / zip from HTTPS, Azure DevOps build artifact, or GitHub Actions artifact/release; publish in dependency order |
 | `bc_dev_uninstall_app` | Automation API `Microsoft.NAV.uninstall` (**not** `DELETE /dev/apps`) |
 | `bc_dev_unpublish_app` | Automation API `Microsoft.NAV.unpublish` (BC 25.4+; uninstall first) |
-| `bc_dev_run_tests` | Run AL unit tests via **Cosmo SSH** (`scp` + `pwsh`/`powershell -File`; `Invoke-NavContainerTests` / `Run-TestsInBcContainer` / `Run-AlTests`) when ip+privateKey present; structured passed/failed/skipped + failure messages |
+| `bc_dev_run_tests` | Run AL unit tests via **Cosmo SSH** (`scp` + `pwsh`/`powershell -File`). Cosmo SSH is **in-container** — uses Client Services / PsTestFunctions (not host BcContainerHelper); structured passed/failed/skipped + failure messages |
 
 **`developerBaseUrl`:** set optional `developerBaseUrl` on `devConnection`, or derive it from on-prem `baseUrl` by replacing a trailing `rest` with `dev` (Alpaca: `…/f0a4d51d4d47rest` → `…/f0a4d51d4d47dev`). After `cosmo_get_container`, wire the derived `restBaseUrl` / `developerBaseUrl` into `devConnection` (company typically CRONUS IS). Verified publish path on Cosmo Alpaca: multipart `/dev/apps` → HTTP 200.
 
 **Uninstall / unpublish:** prefer Automation API (`bc_dev_uninstall_app` / `bc_dev_unpublish_app`). If those fail or the container only allows SSH ops, use `cosmo_ssh_info` then `Uninstall-NavApp` / `Unpublish-NavApp` over SSH.
 
-**`bc_dev_run_tests`:** prefers Cosmo SSH (`GET /Container/Ssh/{id}`). SSH is **usable when `ipAddress` and `privateKey` are present** — do **not** require `available===true` (`available=false` is expected while Starting after Stop→Start). Connects as `sshuser` with `privateKey` (never logged). Remote invoke is **`scp` of local `run-tests.ps1` → `C:\Windows\Temp\origo-bc-run-tests-<id>.ps1`, then `pwsh -NoProfile -File <remote>`** (fallback `powershell.exe -File`); best-effort remote delete afterward. **Do not** pipe the script on stdin to `pwsh -Command -` (Cosmo Windows OpenSSH aborts after the first `Write-Host`). Runs `Invoke-NavContainerTests` / `Run-TestsInBcContainer` / `Run-AlTests`, with brief retries if connect fails during Starting. When ip/key are missing, returns a **blocked** error (no silent fallback) with Stop→Start recreate + `cosmo_create_container`/`sshEnabled=true` hints. Cosmo OpenAPI has **no** `/Container/Exec/{id}/…` test-runner endpoint (only `deployApp`, `appinfo`, `restartServerInstance`, `backup`, `dllCollection`, `eventlog`, `prepareForBaseApp`). `mode=helper` is local-docker only (`containerName`). Reuses stdio/`devConnection` NavUserPassword credentials. Returns structured counts + failure messages (truncated previews, not megabyte dumps).
+**`bc_dev_run_tests`:** prefers Cosmo SSH (`GET /Container/Ssh/{id}`). SSH is **usable when `ipAddress` and `privateKey` are present** — do **not** require `available===true` (`available=false` is expected while Starting after Stop→Start). Connects as `sshuser` with `privateKey` (never logged). Remote invoke is **`scp` of local `run-tests.ps1` (+ vendored `PsTestFunctions.ps1` / `ClientContext.ps1`) → `C:\Windows\Temp\…`, then `pwsh -NoProfile -File <remote>`** (fallback `powershell.exe -File`); best-effort remote delete afterward. **Do not** pipe the script on stdin to `pwsh -Command -` (Cosmo Windows OpenSSH aborts after the first `Write-Host`).
+
+**Cosmo SSH is inside the BC container** (not a Docker host). Host-side `Invoke-NavContainerTests` / `Run-TestsInBcContainer` / `Run-AlTests` usually do **not** exist there. The remote script therefore:
+
+1. Dot-sources `C:\Run\Prompt.ps1` when present.
+2. If host helpers are missing → **in-container Client Services** path (same approach `Run-TestsInBcContainer` uses *inside* the container): locate Service-folder Newtonsoft + `Microsoft.Dynamics.Framework.UI.Client.dll`, load PsTestFunctions (scp upload or `Install-Module BcContainerHelper`), `New-ClientContext` to local NST `/cs?tenant=…`, `Run-Tests` (tries pages 130455 → 130202 → 130203 → 130409).
+3. **Option B (BC 27.5+/28):** if Client Services pages fail (page 130455 removed), best-effort `Invoke-NAVCodeunit` **130201** (CLI Test Runner / TestRunner-Internal) — documented clearly; JUnit may be absent.
+4. Soft diagnostics via `Get-NAVAppInfo` if runners fail (toolkit is often already present on Cosmo; do not treat publish as a hard gate).
+
+Brief SSH connect retries while Starting. When ip/key are missing, returns a **blocked** error (no silent fallback) with Stop→Start recreate + `cosmo_create_container`/`sshEnabled=true` hints. Cosmo OpenAPI has **no** `/Container/Exec/{id}/…` test-runner endpoint. `mode=helper` is local-docker only (`containerName`). Reuses stdio/`devConnection` NavUserPassword credentials. Returns structured counts + failure messages (truncated previews; never logs `privateKey` / Nav passwords beyond truncated previews).
 
 **Follow-up (out of scope here):** `alc` compile orchestration.
 
@@ -536,7 +545,7 @@ Public container host (for `{id}rest` / `{id}dev`) remains
 | Install app from NuGet / Azure DevOps **feed** | `cosmo_deploy_app` |
 | Publish local `.app`, GitHub Actions / ADO / HTTPS artifact | `bc_dev_publish_app` / `bc_dev_publish_artifact` |
 | Uninstall / unpublish | `bc_dev_uninstall_app` / `bc_dev_unpublish_app` first; SSH `Uninstall-NavApp` / `Unpublish-NavApp` via `cosmo_ssh_info` if needed |
-| AL unit tests | `bc_dev_run_tests` (SSH when ip+key present via scp/`-File`; blocked with recreate hint otherwise). Cosmo has no Exec test-runner API. |
+| AL unit tests | `bc_dev_run_tests` (SSH when ip+key present via scp/`-File`; **in-container Client Services / PsTestFunctions**, not host BcContainerHelper; blocked with recreate hint otherwise). Cosmo has no Exec test-runner API. |
 
 #### Ephemeral Cosmo loop (policy)
 

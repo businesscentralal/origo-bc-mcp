@@ -4,10 +4,20 @@
  * Preferred path (Cosmo): GET /Container/Ssh/{id}; SSH is usable when
  * ipAddress AND privateKey are present (do NOT require available===true —
  * available=false is expected while the container is Starting after Stop→Start).
- * SSH as sshuser with privateKey; scp local run-tests.ps1 to a remote temp path,
- * then `pwsh -NoProfile -File <remote>` (fallback: powershell.exe -File).
+ * SSH as sshuser with privateKey; scp local run-tests.ps1 (+ vendored
+ * PsTestFunctions.ps1 / ClientContext.ps1) to a remote temp path, then
+ * `pwsh -NoProfile -File <remote>` (fallback: powershell.exe -File).
  * Do NOT pipe the script on stdin to `pwsh -Command -` (Cosmo Windows aborts
  * after the first Write-Host). Never log/echo the privateKey.
+ *
+ * Cosmo SSH lands **inside** the BC container (sshuser), not on a Docker host.
+ * Host-side BcContainerHelper cmdlets (Invoke-NavContainerTests /
+ * Run-TestsInBcContainer / Run-AlTests) are usually absent. When missing, the
+ * remote script uses the **in-container Client Services** path (same approach
+ * Run-TestsInBcContainer uses *inside* the container): Prompt.ps1, local NST
+ * Client Services URL, New-ClientContext + Run-Tests from PsTestFunctions.
+ * Option B (BC 27.5+/28): CLI Test Runner codeunit 130201 via Invoke-NAVCodeunit
+ * if page 130455 is gone.
  *
  * When ip/key missing: return a clear error (do NOT silently fall back) with
  * Stop→Start recreate + create-with-sshEnabled=true hints. Retry briefly on
@@ -20,12 +30,14 @@
 import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync, } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
 import { cosmoRequest } from "../cosmo/client.js";
 const COSMO_EXEC_TEST_NOTE = "Cosmo Alpaca OpenAPI has no /Container/Exec/{id} test-runner endpoint " +
     "(only deployApp, appinfo, restartServerInstance, backup, dllCollection, eventlog, prepareForBaseApp). " +
-    "AL unit tests require SSH (Invoke-NavContainerTests / Run-TestsInBcContainer / Run-AlTests).";
+    "AL unit tests require SSH into the BC container; Cosmo SSH is in-container (Client Services / " +
+    "PsTestFunctions), not host-side BcContainerHelper.";
 const SSH_UNAVAILABLE_HINT = "Cosmo SSH credentials missing (need ipAddress + privateKey from cosmo_ssh_info). " +
     "Note: available=false during Starting is normal after Stop→Start — usable SSH is keyed off ip+privateKey, not available===true. " +
     "If both are absent: (1) cosmo_update_container state=Stop, then state=Start (or delete + cosmo_create_container with sshEnabled=true), " +
@@ -154,15 +166,40 @@ export async function fetchCosmoSshInfo(containerId) {
     const res = await cosmoRequest("GET", `/Container/Ssh/${encodeURIComponent(containerId)}`);
     return normalizeSshInfo(res.body, res.status);
 }
-function buildRemoteTestScript(input, conn) {
+/** Resolve vendored PsTestFunctions + ClientContext next to compiled JS (or src checkout). */
+export function resolvePsTestHelperPaths() {
+    const here = dirname(fileURLToPath(import.meta.url));
+    const candidates = [
+        join(here, "pstest"),
+        join(here, "..", "..", "src", "bc", "pstest"),
+        join(process.cwd(), "src", "bc", "pstest"),
+        join(process.cwd(), "dist", "bc", "pstest"),
+    ];
+    for (const dir of candidates) {
+        const ps = join(dir, "PsTestFunctions.ps1");
+        const cc = join(dir, "ClientContext.ps1");
+        if (existsSync(ps) && existsSync(cc)) {
+            return { psTestFunctions: ps, clientContext: cc };
+        }
+    }
+    return {};
+}
+/**
+ * Remote PowerShell for Cosmo SSH (inside BC container).
+ * Prefer host helpers if present; else in-container Client Services / PsTestFunctions.
+ */
+export function buildRemoteTestScript(input, conn, opts) {
     const company = input.companyName?.trim() || conn.companyName?.trim() || "CRONUS IS";
     const tenant = input.tenant?.trim() || conn.onPremTenant || "default";
     const suite = input.testSuite?.trim() || "DEFAULT";
     const user = conn.user || "";
     const pass = conn.key || "";
+    const remotePs = opts?.remotePsTestFunctions || "";
+    const remoteCc = opts?.remoteClientContext || "";
     const lines = [
         "$ErrorActionPreference = 'Continue'",
         "Write-Host '[MCP] bc_dev_run_tests remote start'",
+        "Write-Host '[MCP] Cosmo SSH is typically inside the BC container (not a Docker host).'",
         `$companyName = '${escPs(company)}'`,
         `$tenant = '${escPs(tenant)}'`,
         `$testSuite = '${escPs(suite)}'`,
@@ -171,40 +208,195 @@ function buildRemoteTestScript(input, conn) {
         `$testFunction = '${escPs(input.testFunction || "")}'`,
         `$user = '${escPs(user)}'`,
         `$passPlain = '${escPs(pass)}'`,
+        `$uploadedPsTest = '${escPs(remotePs)}'`,
+        `$uploadedClientCtx = '${escPs(remoteCc)}'`,
         `$cred = $null`,
         `if ($user -and $passPlain) { $cred = New-Object pscredential($user, (ConvertTo-SecureString $passPlain -AsPlainText -Force)) }`,
         `$junit = Join-Path $env:TEMP ('mcp-al-tests-' + [guid]::NewGuid().ToString() + '.xml')`,
-        `# Prefer documented helpers in order`,
+        `# Load container NAV Management if present (Cosmo in-container)`,
+        `if (Test-Path 'C:\\Run\\Prompt.ps1') {`,
+        `  Write-Host '[MCP] Dot-sourcing C:\\Run\\Prompt.ps1'`,
+        `  . 'C:\\Run\\Prompt.ps1'`,
+        `}`,
+        `# --- Path 1: host-side BcContainerHelper cmdlets (rare on Cosmo SSH) ---`,
         `$cmd = $null`,
         `foreach ($name in @('Invoke-NavContainerTests','Run-TestsInBcContainer','Run-AlTests','Invoke-ALTests')) {`,
         `  if (Get-Command $name -ErrorAction SilentlyContinue) { $cmd = $name; break }`,
         `  if (Get-Module -ListAvailable BcContainerHelper) { Import-Module BcContainerHelper -ErrorAction SilentlyContinue; if (Get-Command $name -ErrorAction SilentlyContinue) { $cmd = $name; break } }`,
         `}`,
-        `if (-not $cmd) {`,
-        `  Write-Host '[MCP] No Invoke-NavContainerTests / Run-TestsInBcContainer / Run-AlTests on SSH host.'`,
-        `  Get-Command *Test* -ErrorAction SilentlyContinue | Select-Object -First 30 | Format-Table -AutoSize | Out-String | Write-Host`,
-        `  exit 3`,
+        `if ($cmd) {`,
+        `  Write-Host "[MCP] Using host helper $cmd"`,
+        `  $params = @{ detailed = $true; returnTrueIfAllPassed = $true }`,
+        `  if ($cred) { $params.credential = $cred }`,
+        `  if ($tenant) { $params.tenant = $tenant }`,
+        `  if ($companyName) { $params.companyName = $companyName }`,
+        `  if ($testSuite) { $params.testSuite = $testSuite }`,
+        `  if ($extensionId) { $params.extensionId = $extensionId }`,
+        `  if ($testCodeunit) { $params.testCodeunit = $testCodeunit }`,
+        `  if ($testFunction) { $params.testFunction = $testFunction }`,
+        `  try { $params.JUnitResultFileName = $junit } catch { }`,
+        `  if ($cmd -eq 'Run-TestsInBcContainer' -or $cmd -eq 'Invoke-NavContainerTests') {`,
+        `    $cn = $env:COMPUTERNAME`,
+        `    if (Get-Command Get-BCContainer -ErrorAction SilentlyContinue) {`,
+        `      if (Get-BCContainer -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $cn }) { $params.containerName = $cn }`,
+        `    }`,
+        `    elseif (Get-Command docker -ErrorAction SilentlyContinue) {`,
+        `      $dn = docker ps --format '{{.Names}}' 2>$null | Select-Object -First 1`,
+        `      if ($dn) { $params.containerName = $dn }`,
+        `    }`,
+        `  }`,
+        `  $allPassed = & $cmd @params`,
+        `  if (Test-Path $junit) { Write-Host "[MCP_JUNIT_BEGIN]"; Get-Content -Raw $junit; Write-Host "[MCP_JUNIT_END]" }`,
+        `  if ($allPassed -eq $false) { Write-Host '[MCP] Some tests failed'; exit 2 }`,
+        `  Write-Host '[MCP] Tests finished (host helper)'; exit 0`,
         `}`,
-        `Write-Host "[MCP] Using $cmd"`,
-        `$params = @{ detailed = $true; returnTrueIfAllPassed = $true }`,
-        `if ($cred) { $params.credential = $cred }`,
-        `if ($tenant) { $params.tenant = $tenant }`,
-        `if ($companyName) { $params.companyName = $companyName }`,
-        `if ($testSuite) { $params.testSuite = $testSuite }`,
-        `if ($extensionId) { $params.extensionId = $extensionId }`,
-        `if ($testCodeunit) { $params.testCodeunit = $testCodeunit }`,
-        `if ($testFunction) { $params.testFunction = $testFunction }`,
-        `try { $params.JUnitResultFileName = $junit } catch { }`,
-        `# Inside Cosmo SSH we are already on the container host; containerName often = hostname`,
-        `if ($cmd -eq 'Run-TestsInBcContainer' -or $cmd -eq 'Invoke-NavContainerTests') {`,
-        `  $cn = $env:COMPUTERNAME`,
-        `  if (Get-BCContainer -ErrorAction SilentlyContinue | Where-Object { $_.Name -eq $cn }) { $params.containerName = $cn }`,
-        `  elseif (docker ps --format '{{.Names}}' 2>$null | Select-Object -First 1) { $params.containerName = (docker ps --format '{{.Names}}' | Select-Object -First 1) }`,
+        `Write-Host '[MCP] No Invoke-NavContainerTests / Run-TestsInBcContainer / Run-AlTests on SSH host — using in-container Client Services path.'`,
+        `# --- Path 2 (Option A): Client Services + PsTestFunctions (inside container) ---`,
+        `function Get-McpPsTestScripts {`,
+        `  $dest = Join-Path $env:TEMP ('mcp-pstest-' + [guid]::NewGuid().ToString())`,
+        `  New-Item -ItemType Directory -Path $dest -Force | Out-Null`,
+        `  $psDest = Join-Path $dest 'PsTestFunctions.ps1'`,
+        `  $ccDest = Join-Path $dest 'ClientContext.ps1'`,
+        `  if ($uploadedPsTest -and $uploadedClientCtx -and (Test-Path $uploadedPsTest) -and (Test-Path $uploadedClientCtx)) {`,
+        `    Copy-Item -Force $uploadedPsTest $psDest`,
+        `    Copy-Item -Force $uploadedClientCtx $ccDest`,
+        `    Write-Host '[MCP] Using scp-uploaded PsTestFunctions + ClientContext'`,
+        `    return @{ Ps = $psDest; Cc = $ccDest; Dir = $dest }`,
+        `  }`,
+        `  Write-Host '[MCP] Install-Module BcContainerHelper -Force (extract PsTestFunctions)'`,
+        `  try {`,
+        `    Install-PackageProvider -Name NuGet -MinimumVersion 2.8.5.201 -Force -ErrorAction SilentlyContinue | Out-Null`,
+        `    Set-PSRepository -Name PSGallery -InstallationPolicy Trusted -ErrorAction SilentlyContinue`,
+        `    Install-Module BcContainerHelper -Force -Scope CurrentUser -AllowClobber -ErrorAction Stop`,
+        `  } catch {`,
+        `    Write-Host "[MCP] Install-Module BcContainerHelper failed: $($_.Exception.Message)"`,
+        `  }`,
+        `  $mod = Get-Module -ListAvailable BcContainerHelper | Sort-Object Version -Descending | Select-Object -First 1`,
+        `  if (-not $mod) { return $null }`,
+        `  $root = Split-Path -Parent $mod.Path`,
+        `  $candidates = @(`,
+        `    (Join-Path $root 'AppHandling\\PsTestFunctions.ps1'),`,
+        `    (Join-Path $root 'PsTestFunctions.ps1')`,
+        `  )`,
+        `  $psSrc = $candidates | Where-Object { Test-Path $_ } | Select-Object -First 1`,
+        `  $ccSrc = @(`,
+        `    (Join-Path $root 'AppHandling\\ClientContext.ps1'),`,
+        `    (Join-Path $root 'ClientContext.ps1')`,
+        `  ) | Where-Object { Test-Path $_ } | Select-Object -First 1`,
+        `  if (-not $psSrc -or -not $ccSrc) {`,
+        `    Write-Host "[MCP] BcContainerHelper at $root but PsTestFunctions/ClientContext not found"`,
+        `    return $null`,
+        `  }`,
+        `  Copy-Item -Force $psSrc $psDest`,
+        `  Copy-Item -Force $ccSrc $ccDest`,
+        `  Write-Host "[MCP] Extracted PsTestFunctions from BcContainerHelper $($mod.Version)"`,
+        `  return @{ Ps = $psDest; Cc = $ccDest; Dir = $dest }`,
         `}`,
-        `$allPassed = & $cmd @params`,
-        `if (Test-Path $junit) { Write-Host "[MCP_JUNIT_BEGIN]"; Get-Content -Raw $junit; Write-Host "[MCP_JUNIT_END]" }`,
-        `if ($allPassed -eq $false) { Write-Host '[MCP] Some tests failed'; exit 2 }`,
-        `Write-Host '[MCP] Tests finished'; exit 0`,
+        `$scripts = Get-McpPsTestScripts`,
+        `$clientServicesOk = $false`,
+        `$lastCsError = ''`,
+        `if ($scripts) {`,
+        `  try {`,
+        `    $serviceItem = Get-Item 'C:\\Program Files\\Microsoft Dynamics NAV\\*\\Service' -ErrorAction Stop | Select-Object -First 1`,
+        `    $serviceDir = $serviceItem.FullName`,
+        `    $newton = Join-Path $serviceDir 'Management\\Newtonsoft.Json.dll'`,
+        `    if (-not (Test-Path $newton)) { $newton = Join-Path $serviceDir 'Newtonsoft.Json.dll' }`,
+        `    $newton = (Get-Item $newton -ErrorAction Stop).FullName`,
+        `    $clientDll = 'C:\\Test Assemblies\\Microsoft.Dynamics.Framework.UI.Client.dll'`,
+        `    if (-not (Test-Path $clientDll)) {`,
+        `      $alt = Get-ChildItem 'C:\\Program Files\\Microsoft Dynamics NAV' -Recurse -Filter 'Microsoft.Dynamics.Framework.UI.Client.dll' -ErrorAction SilentlyContinue | Select-Object -First 1`,
+        `      if ($alt) { $clientDll = $alt.FullName }`,
+        `    }`,
+        `    if (-not (Test-Path $clientDll)) { throw "Microsoft.Dynamics.Framework.UI.Client.dll not found (expected under C:\\Test Assemblies)" }`,
+        `    $customConfigFile = Join-Path $serviceDir 'CustomSettings.config'`,
+        `    [xml]$customConfig = [System.IO.File]::ReadAllText($customConfigFile)`,
+        `    $publicWebBaseUrl = $customConfig.SelectSingleNode("//appSettings/add[@key='PublicWebBaseUrl']").Value.TrimEnd('/')`,
+        `    $authType = $customConfig.SelectSingleNode("//appSettings/add[@key='ClientServicesCredentialType']").Value`,
+        `    if (-not $authType) { $authType = 'NavUserPassword' }`,
+        `    $uri = [Uri]::new($publicWebBaseUrl)`,
+        `    $serviceUrl = "$($uri.Scheme)://localhost:$($uri.Port)$($uri.PathAndQuery)/cs?tenant=$tenant"`,
+        `    if ($companyName) { $serviceUrl += "&company=$([Uri]::EscapeDataString($companyName))" }`,
+        `    Write-Host "[MCP] Client Services URL: $serviceUrl (auth=$authType)"`,
+        `    . $scripts.Ps -newtonSoftDllPath $newton -clientDllPath $clientDll -clientContextScriptPath $scripts.Cc`,
+        `    $pagesToTry = @(130455, 130202, 130203, 130409)`,
+        `    $interactionTimeout = [timespan]::FromMinutes(10)`,
+        `    foreach ($testPage in $pagesToTry) {`,
+        `      $clientContext = $null`,
+        `      try {`,
+        `        Write-Host "[MCP] New-ClientContext + Run-Tests testPage=$testPage"`,
+        `        if (Get-Command Disable-SslVerification -ErrorAction SilentlyContinue) { Disable-SslVerification }`,
+        `        $clientContext = New-ClientContext -serviceUrl $serviceUrl -auth $authType -credential $cred -interactionTimeout $interactionTimeout -culture 'en-US'`,
+        `        $rtParams = @{`,
+        `          clientContext = $clientContext`,
+        `          TestSuite = $testSuite`,
+        `          detailed = $true`,
+        `          testPage = $testPage`,
+        `          JUnitResultFileName = $junit`,
+        `        }`,
+        `        if ($extensionId) { $rtParams.ExtensionId = $extensionId }`,
+        `        if ($testCodeunit) { $rtParams.TestCodeunit = $testCodeunit }`,
+        `        if ($testFunction) { $rtParams.TestFunction = $testFunction }`,
+        `        $allPassed = Run-Tests @rtParams`,
+        `        $clientServicesOk = $true`,
+        `        if (Test-Path $junit) { Write-Host "[MCP_JUNIT_BEGIN]"; Get-Content -Raw $junit; Write-Host "[MCP_JUNIT_END]" }`,
+        `        if ($allPassed -eq $false) { Write-Host '[MCP] Some tests failed'; exit 2 }`,
+        `        Write-Host '[MCP] Tests finished (Client Services / PsTestFunctions)'; exit 0`,
+        `      } catch {`,
+        `        $lastCsError = $_.Exception.Message`,
+        `        Write-Host "[MCP] testPage $testPage failed: $lastCsError"`,
+        `        if ($_.ScriptStackTrace) { Write-Host $_.ScriptStackTrace }`,
+        `      } finally {`,
+        `        if ($clientContext -and (Get-Command Remove-ClientContext -ErrorAction SilentlyContinue)) {`,
+        `          try { Remove-ClientContext -clientContext $clientContext } catch { }`,
+        `        }`,
+        `        if (Get-Command Enable-SslVerification -ErrorAction SilentlyContinue) { Enable-SslVerification }`,
+        `      }`,
+        `      if ($clientServicesOk) { break }`,
+        `    }`,
+        `  } catch {`,
+        `    $lastCsError = $_.Exception.Message`,
+        `    Write-Host "[MCP] Client Services path setup failed: $lastCsError"`,
+        `  }`,
+        `} else {`,
+        `  Write-Host '[MCP] Could not obtain PsTestFunctions.ps1 / ClientContext.ps1 (scp upload missing and Install-Module failed).'`,
+        `}`,
+        `# --- Path 3 (Option B): BC 27.5+/28 CLI Test Runner codeunit 130201 ---`,
+        `Write-Host '[MCP] Option B: Invoke-NAVCodeunit CLI Test Runner (codeunit 130201 / TestRunner-Internal)'`,
+        `Write-Host '[MCP] Note: page 130455 was removed in BC 27.5+; codeunit 130201 is the documented replacement. This path is best-effort via Invoke-NAVCodeunit (no rich JUnit from Snap unless the codeunit writes results).'`,
+        `if (Get-Command Invoke-NAVCodeunit -ErrorAction SilentlyContinue) {`,
+        `  try {`,
+        `    $si = $null`,
+        `    if (Get-Command Get-NAVServerInstance -ErrorAction SilentlyContinue) {`,
+        `      $inst = Get-NAVServerInstance | Select-Object -First 1`,
+        `      if ($inst) { $si = $inst.ServerInstance }`,
+        `    }`,
+        `    if (-not $si -and $env:ServerInstance) { $si = $env:ServerInstance }`,
+        `    if (-not $si -and $env:webserverinstance) { $si = $env:webserverinstance }`,
+        `    if (-not $si) { $si = 'BC' }`,
+        `    Write-Host "[MCP] Invoke-NAVCodeunit -ServerInstance $si -CodeunitId 130201 -CompanyName $companyName -Tenant $tenant"`,
+        `    Invoke-NAVCodeunit -ServerInstance $si -Tenant $tenant -CompanyName $companyName -CodeunitId 130201 -ErrorAction Stop`,
+        `    Write-Host '[MCP] Invoke-NAVCodeunit 130201 completed (check NST/event log for Snap / CLI Test Runner detail)'`,
+        `    Write-Host 'Passed: 0'`,
+        `    Write-Host '[MCP] Option B finished without JUnit — treat as inconclusive unless logs show results'; exit 5`,
+        `  } catch {`,
+        `    Write-Host "[MCP] Option B Invoke-NAVCodeunit 130201 failed: $($_.Exception.Message)"`,
+        `  }`,
+        `} else {`,
+        `  Write-Host '[MCP] Invoke-NAVCodeunit not available (Prompt.ps1 / NAV Management module missing?).'`,
+        `}`,
+        `# Diagnostics — soft guidance (toolkit often already present on Cosmo)`,
+        `Write-Host '[MCP] All in-container runners failed.'`,
+        `if ($lastCsError) { Write-Host "[MCP] Last Client Services error: $lastCsError" }`,
+        `Write-Host '[MCP] If Test Toolkit apps are missing, publish Test Runner + libraries first (bc_dev_publish_* / cosmo_deploy), then verify:'`,
+        `Write-Host '  Get-NAVAppInfo -ServerInstance <si> -TenantDefaultCompany | Where-Object { $_.Name -match ''Test'' }'`,
+        `Write-Host '  (Expect Test Runner, Tests-TestLibraries, Library Assert, etc.)'`,
+        `if (Get-Command Get-NAVAppInfo -ErrorAction SilentlyContinue) {`,
+        `  try {`,
+        `    $si2 = $si; if (-not $si2) { $si2 = 'BC' }`,
+        `    Get-NAVAppInfo -ServerInstance $si2 -ErrorAction SilentlyContinue | Where-Object { $_.Name -match 'Test' } | Select-Object -First 20 Name, Version | Format-Table -AutoSize | Out-String | Write-Host`,
+        `  } catch { }`,
+        `}`,
+        `exit 3`,
     ];
     return lines.join("\n");
 }
@@ -265,7 +457,18 @@ async function runViaSsh(input, conn, ssh) {
     const dir = mkdtempSync(join(tmpdir(), "origo-bc-run-tests-"));
     const keyPath = join(dir, "cosmo_ssh_key");
     const scriptPath = join(dir, "run-tests.ps1");
-    const remoteScript = buildRemoteTestScript(input, conn);
+    const remoteId = randomBytes(8).toString("hex");
+    const { winPath: remoteWinPath, scpPath: remoteScpPath } = remoteRunTestsPath(remoteId);
+    // Windows paths embedded into the remote PS1 (single backslash for PowerShell)
+    const remotePsWin = "C:\\Windows\\Temp\\origo-bc-pstest-" + remoteId + "-PsTestFunctions.ps1";
+    const remoteCcWin = "C:\\Windows\\Temp\\origo-bc-pstest-" + remoteId + "-ClientContext.ps1";
+    const remotePsScp = `C:/Windows/Temp/origo-bc-pstest-${remoteId}-PsTestFunctions.ps1`;
+    const remoteCcScp = `C:/Windows/Temp/origo-bc-pstest-${remoteId}-ClientContext.ps1`;
+    const helpers = resolvePsTestHelperPaths();
+    const remoteScript = buildRemoteTestScript(input, conn, {
+        remotePsTestFunctions: helpers.psTestFunctions ? remotePsWin : "",
+        remoteClientContext: helpers.clientContext ? remoteCcWin : "",
+    });
     writeFileSync(keyPath, ssh.privateKey.endsWith("\n") ? ssh.privateKey : ssh.privateKey + "\n", {
         encoding: "utf8",
         mode: 0o600,
@@ -281,11 +484,9 @@ async function runViaSsh(input, conn, ssh) {
     const port = ssh.port || "22";
     const timeoutMs = input.timeoutMs ?? 15 * 60 * 1000;
     const target = `${user}@${ssh.ipAddress}`;
-    const remoteId = randomBytes(8).toString("hex");
-    const { winPath: remoteWinPath, scpPath: remoteScpPath } = remoteRunTestsPath(remoteId);
-    const commandPreview = `scp -i <key> -P ${port} run-tests.ps1 ${target}:${remoteScpPath} && ` +
+    const commandPreview = `scp -i <key> -P ${port} run-tests.ps1[+pstest] ${target}:${remoteScpPath} && ` +
         `ssh -i <key> -p ${port} ${target} pwsh|powershell -NoProfile -File ${remoteWinPath}` +
-        `  # extensionId=${input.extensionId ?? ""}`;
+        `  # extensionId=${input.extensionId ?? ""} in-container Client Services`;
     const sshOpts = sshClientOpts(keyPath, port);
     // scp uses -P for port; strip ssh's -p and rebuild
     const scpOpts = [
@@ -314,6 +515,16 @@ async function runViaSsh(input, conn, ssh) {
     };
     const scpTimeout = Math.min(timeoutMs, 60_000);
     const scpProc = await runProcess("scp", [...scpOpts, scriptPath, `${target}:${remoteScpPath}`], { timeoutMs: scpTimeout });
+    if (scpProc.exitCode === 0 && helpers.psTestFunctions && helpers.clientContext) {
+        const scpPs = await runProcess("scp", [...scpOpts, helpers.psTestFunctions, `${target}:${remotePsScp}`], { timeoutMs: scpTimeout });
+        const scpCc = await runProcess("scp", [...scpOpts, helpers.clientContext, `${target}:${remoteCcScp}`], { timeoutMs: scpTimeout });
+        if (scpPs.exitCode !== 0 || scpCc.exitCode !== 0) {
+            // Non-fatal: remote script can Install-Module BcContainerHelper as Option A fallback
+            scpProc.stderr +=
+                `\n[MCP] pstest helper scp failed (ps=${scpPs.exitCode}, cc=${scpCc.exitCode}); remote will try Install-Module\n` +
+                    truncate(scpPs.stderr + "\n" + scpCc.stderr, 2000);
+        }
+    }
     if (scpProc.exitCode !== 0) {
         wipeLocal();
         return {
@@ -346,7 +557,9 @@ async function runViaSsh(input, conn, ssh) {
         shellUsed = "powershell.exe";
     }
     // Best-effort remote delete of uploaded script (never log key).
-    const delPs = `Remove-Item -LiteralPath '${remoteWinPath.replace(/'/g, "''")}' -Force -ErrorAction SilentlyContinue`;
+    const delPs = `Remove-Item -LiteralPath '${remoteWinPath.replace(/'/g, "''")}' -Force -ErrorAction SilentlyContinue; ` +
+        `Remove-Item -LiteralPath '${remotePsWin.replace(/'/g, "''")}' -Force -ErrorAction SilentlyContinue; ` +
+        `Remove-Item -LiteralPath '${remoteCcWin.replace(/'/g, "''")}' -Force -ErrorAction SilentlyContinue`;
     try {
         await runProcess("ssh", [...sshOpts, target, "powershell.exe", "-NoProfile", "-Command", delPs], { timeoutMs: 15_000 });
     }
@@ -397,7 +610,9 @@ async function runViaSsh(input, conn, ssh) {
         commandPreview,
         hint: proc.exitCode === 0
             ? undefined
-            : "SSH ran but tests did not all pass (or helper missing). Ensure Test Toolkit is installed and extensionId/companyName are correct.",
+            : "SSH ran in-container Client Services / PsTestFunctions (or Option B codeunit 130201) but tests did not all pass. " +
+                "Cosmo SSH is inside the BC container — not host BcContainerHelper. " +
+                "If pages 130455/130202 fail, check Test Toolkit via Get-NAVAppInfo; verify extensionId/companyName.",
     };
 }
 async function runHelperLocal(input, conn) {
