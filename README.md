@@ -2,6 +2,8 @@
 
 Origo Business Central MCP server — connects AI clients (VS Code Copilot, Claude Desktop, etc.) to Business Central via the Cloud Events API.
 
+**Setting this up for the first time? Start at the [installation overview](#installation-overview)** — it takes four parts, two of which are inside Business Central.
+
 ## Features
 
 | Area | Tools | Description |
@@ -24,15 +26,43 @@ Origo Business Central MCP server — connects AI clients (VS Code Copilot, Clau
 | **Cosmo Alpaca** | `cosmo_list_containers`, `cosmo_get_container`, `cosmo_create_container`, `cosmo_update_container`, `cosmo_delete_container`, `cosmo_deploy_app`, `cosmo_get_app_info`, `cosmo_ssh_info`, `cosmo_restart_nst`, `cosmo_whoami_config` | Cosmo Alpaca container lifecycle, feed deploy, SSH info, NST restart (Bearer; independent of BC auth) |
 | Skills | `get_cloud_events_api_skill` | Bundled reference docs for the Cloud Events API |
 
-## Prerequisites
+## Installation overview
+
+A working connection has four parts, and all of them have to be right. The most
+common failure is finishing Part A and assuming that is the install — Parts C and
+D are inside Business Central and are easy to miss.
+
+| Part | Where | What |
+|------|-------|------|
+| **[A](#part-a--your-machine)** | Your machine | Install the MCP server and configure the connection |
+| **[B](#part-b--entra-azure)** | Entra (Azure) | App registration with access to BC |
+| **[C](#part-c--origo-cloud-events-core-extension)** | Business Central | Install the Origo Cloud Events Core extension |
+| **[D](#part-d--register-the-app-in-bc-and-grant-permissions)** | Business Central | Register the app and grant it permissions |
+
+Part A on its own gives you a server that starts, authenticates, and returns
+nothing useful. When you are done, run the [verification sequence](#verify-the-whole-chain) —
+each step proves one part.
+
+---
+
+## Part A — Your machine
+
+### 1. Prerequisites
 
 - **Node.js 22+** — [nodejs.org](https://nodejs.org) (LTS recommended)
 
-## Install
+```bash
+node --version
+```
+
+### 2. Install from GitHub
 
 ```bash
 npm install -g github:businesscentralal/origo-bc-mcp
 ```
+
+npm clones the repository with git, so you need access to it (an SSH key or a
+signed-in credential helper) before this command will succeed.
 
 Verify:
 
@@ -40,7 +70,7 @@ Verify:
 origo-bc-mcp-server --help
 ```
 
-## Setup
+### 3. Configure the connection
 
 Run the interactive setup wizard:
 
@@ -56,7 +86,222 @@ The wizard walks you through:
 5. MCP client configuration (`mcp.json` for VS Code)
 6. Desktop shortcut (optional)
 
-Configuration is stored in `~/.origo-bc-mcp/local.settings.json` (macOS/Linux) or `%USERPROFILE%\.origo-bc-mcp\local.settings.json` (Windows).
+To add a single connection without running the whole wizard:
+
+```bash
+origo-bc-mcp-server add sandbox1
+```
+
+### 4. The settings file
+
+Settings land in `~/.origo-bc-mcp/local.settings.json` (macOS/Linux) or
+`%USERPROFILE%\.origo-bc-mcp\local.settings.json` (Windows). A SaaS connection
+looks like this:
+
+```json
+{
+  "devConnection": {
+    "tenantId": "<entra-tenant-guid>",
+    "clientId": "<app-client-id>",
+    "authType": "s2s",
+    "clientSecret": "keychain:origo-bc-mcp-default-secret",
+    "environment": "Sandbox1",
+    "companyId": "Vorpun"
+  }
+}
+```
+
+That is everything a stdio connection needs. `devConnection` is the only BC
+credential — the app authenticates service-to-service (S2S) with a client ID and
+a secret.
+
+- **`companyId` must be current.** A stale company name gives
+  `Company '<name>' not found` on the first call.
+- **Store secrets behind a prefix** — `keychain:` (macOS), `dpapi:` (Windows),
+  `env:` or `aes:`. Never in plain text.
+- **Validate the JSON after any manual edit.** The server reads this file inside
+  a `try`/`catch` and falls back to empty settings when it cannot parse it. No
+  error mentions the file — you only see `No auth context` later, from a tool
+  call. A single stray comma is enough. Quick check:
+
+  ```bash
+  python3 -m json.tool ~/.origo-bc-mcp/local.settings.json
+  ```
+
+#### About `basicAuth`
+
+The setup wizard usually also writes a `basicAuth` block. It does not apply to
+stdio connections and can be left alone:
+
+```json
+"basicAuth": { "enabled": true, "username": "dev", "password": "<password>" }
+```
+
+`basicAuth` protects the server's HTTP endpoints and the dashboard (`/dashboard`)
+when it runs in HTTP mode. Over stdio there is no HTTP traffic and no headers are
+sent, so the credentials are never used.
+
+The one visible effect: the username becomes a label that shows up as the
+`principal` in `who_am_i`. That is not a BC user and it does not exist in BC. The
+real identity is `user.userName` in the `who_am_i` response — the name of the
+Entra app as registered in BC.
+
+### 5. Connect your MCP client
+
+#### Claude Code (stdio — recommended)
+
+Create `.mcp.json` in the project folder:
+
+```json
+{
+  "mcpServers": {
+    "origo-bc-mcp-sandbox1": {
+      "command": "origo-bc-mcp-server",
+      "args": ["--stdio"]
+    }
+  }
+}
+```
+
+This is a stdio connection — the server runs as a child process, with no network
+service and no port. That is why it does not show up under **Connections** in the
+app: it is scoped to that folder.
+
+To use a connection other than `devConnection`, set `MCP_CONNECTION` in an `env`
+block. See [Stdio auth for BC tools](#stdio-auth-for-bc-tools).
+
+#### VS Code
+
+The `setup` wizard writes VS Code's `mcp.json` for you. For other clients over
+HTTP, see [Configure an MCP client](#configure-an-mcp-client).
+
+---
+
+## Part B — Entra (Azure)
+
+An app registration must exist with:
+
+- **Client ID** and **Tenant ID** — these go into `local.settings.json`
+- **Client secret** — stored in Keychain / DPAPI / an environment variable
+- **API permission:** Dynamics 365 Business Central → `API.ReadWrite.All` (Application)
+- **Admin consent** granted
+
+This is access *to the door* only. What the app may actually do inside BC is
+decided in Part D.
+
+---
+
+## Part C — Origo Cloud Events Core extension
+
+The server runs every data call and every action through the custom API that this
+extension publishes:
+
+```
+/api/origo/{bifrost|cloudEvent}/v1.0/companies(<guid>)/tasks
+```
+
+(The server tries the `bifrost` group first and falls back to the legacy
+`cloudEvent` group — `cloudevent` on-prem.)
+
+Without the extension almost nothing works — not `who_am_i`, `get_records`,
+`list_message_types`, nor any message type.
+
+Install it in BC: **Extension Management → Manage → Extension Marketplace**
+(AppSource), or **Upload Extension** for a `.app` file.
+
+> **Silent failure warning.** The standard BC API (`/api/v2.0/`) keeps working
+> perfectly without the extension. So `bc_api_request` returns correct data while
+> `get_records` returns empty results and no error at all. It looks like an empty
+> company, not a broken install. **When those two disagree, suspect the extension.**
+
+---
+
+## Part D — Register the app in BC and grant permissions
+
+This is the part that gets forgotten most often.
+
+### 1. Register the app
+
+Search BC for the **Microsoft Entra Applications** page (formerly **AAD
+Applications**).
+
+- Create an entry with the app's Client ID
+- Set **State = Enabled**
+
+This is inside Business Central, not the Entra portal. The app does not appear
+under **Users** — S2S apps live on their own page.
+
+### 2. Grant permissions
+
+Under **User Permission Sets** on that entry:
+
+**Test environments** — one set is enough:
+
+| Set | Name |
+|-----|------|
+| `CE FULL ACCESS ORI` | Full Access |
+
+**Production** — least privilege. The base set plus whichever gates you need:
+
+| Set | Name | Opens |
+|-----|------|-------|
+| `CE API ACCESS ORI` | API Access | Base — always required |
+| `CE JOB POST ORI` | Project Posting Gate | Posting to projects |
+| `CE WHSE POST ORI` | Warehouse Posting Gate | Picks and warehouse postings |
+| `CE ITEM POST ORI` | Item Posting Gate | Item ledger entries |
+| `CE G/L POST ORI` | G/L Posting Gate | General ledger postings |
+| `CE READ ALL ORI` | Read-Only | Read access only |
+
+The app also needs standard BC permissions (`D365 FULL ACCESS` or equivalent).
+
+`CE READ ALL ORI` is **not** sufficient on its own — not even for pure reading.
+Every call writes a record to the Cloud Event Message table, so the base access
+has to be there.
+
+### 3. Change Log Write Guard (writes only)
+
+The extension protects writes with an allowlist. A write to a field that is not
+on it stops with:
+
+```
+Field "1" in table 167 must be included in the change log write guard setup
+to be updated via Cloud Events.
+```
+
+If the MCP connection needs to change particular fields, add them to the **Change
+Log Write Guard** setup in BC. This is a deliberate safety valve — do not work
+around it without a reason.
+
+---
+
+## Verify the whole chain
+
+Run these in order. Each step proves one part:
+
+| # | Call | Should return | Points at |
+|---|------|---------------|-----------|
+| 1 | `who_am_i` | `status: Success` and the app's BC user name | Part C or D missing |
+| 2 | `list_message_types` | ~22 namespaces (Help, Data, Sales, Warehouse …) | Part D — permissions |
+| 3 | `get_records` on `Customer` | Real records | Part C — empty result, no error |
+| 4 | `bc_api_request` on `customers` | The same records | Part A or B |
+
+If step 4 returns data but step 3 does not, the extension (Part C) is missing or
+the permission sets are short.
+
+## What the connection can and cannot do
+
+**Can:** read and write any BC table through `get_records` / `set_records`, run
+~80 message types (posting sales and purchase documents, approvals, warehouse
+documents, and so on), and call the standard API directly.
+
+**Cannot:** run arbitrary UI actions. An action that is a button on a BC page is
+only reachable if it has been published as a message type. For example, **Create
+Inventory Pick** on a project does not exist as a message type — the only pick
+action is `Warehouse.Pick.Create`, from a warehouse shipment. Actions like that
+have to be run in the UI.
+
+List what is available with `list_message_types`, and get usage details with
+`get_message_type_help`.
 
 ## Managing connections
 
@@ -373,14 +618,23 @@ security delete-generic-password -a mcp-encrypted-conn -s origo-bc-mcp-default-s
 
 ## Troubleshooting
 
-| Problem | Solution |
-|---------|----------|
-| `command not found` / `not recognized` | Restart terminal; check npm global bin is in PATH: `npm bin -g` |
-| `Unsupported engine` | Install Node.js 22+ |
-| `ECONNREFUSED` when calling BC | Verify connection settings — run `origo-bc-mcp-server verify` |
-| `Authentication_InvalidCredentials` | Check credentials — run `origo-bc-mcp-server verify` to re-auth |
-| Port 3000 in use | Use a different port (see above) |
-| SSL errors against on-prem BC | `NODE_TLS_REJECT_UNAUTHORIZED=0 origo-bc-mcp-server` (dev only) |
+Real messages from installs, and what is actually behind them:
+
+| Message | Cause | Fix |
+|---------|-------|-----|
+| `No HTTP resource was found … /cloudEvent/v1.0/…/tasks` (404) | Cloud Events Core extension not installed | [Part C](#part-c--origo-cloud-events-core-extension) |
+| `Sorry, the current permissions prevented the action.` (TableData 10075497 Cloud Event Message IndirectInsert) | App has no CE permission sets | [Part D.2](#2-grant-permissions) |
+| `Field "N" in table X must be included in the change log write guard setup` | Field is not on the write allowlist | [Part D.3](#3-change-log-write-guard-writes-only) |
+| `Company '<name>' not found` | Stale `companyId` in the settings file | [Part A.4](#4-the-settings-file) |
+| `get_records` returns 0 rows but `bc_api_request` returns data | Extension missing — silent failure | [Part C](#part-c--origo-cloud-events-core-extension) |
+| `No auth context — request reached a tool without authentication` | `devConnection` missing or unresolvable — **or `local.settings.json` is invalid JSON** | [Part A.4](#4-the-settings-file) |
+| `Invalid expression of type: table view` | Wrong filter syntax | Use BC format: `WHERE(Job No.=FILTER(000573))` |
+| `Authentication_InvalidCredentials` | Bad or expired credentials | `origo-bc-mcp-server verify` |
+| `ECONNREFUSED` when calling BC | Connection settings wrong | `origo-bc-mcp-server verify` |
+| `command not found` / `not recognized` | npm global bin not on PATH | Restart the terminal; check `npm bin -g` |
+| `Unsupported engine` | Node.js older than 22 | Install Node.js 22+ |
+| Port 3000 in use | HTTP mode port conflict | Use a different port (see above) |
+| SSL errors against on-prem BC | Self-signed certificate | `NODE_TLS_REJECT_UNAUTHORIZED=0 origo-bc-mcp-server` (dev only) |
 
 ## Custom config path
 
@@ -443,7 +697,10 @@ tenants), exactly like `x-origo-token`.
   Mirrors the legacy `BC_ONPREM_*` mode. `bc_list_companies` returns the
   configured company; data calls use `Basic base64(user:key)` against
   `{baseUrl}/api/origo/cloudevent/v1.0/...?tenant=...`.
-- **SaaS** (`tenantId`, `clientId`, `clientSecret` or `refreshToken`) — Entra.
+- **SaaS** (`tenantId`, `clientId`, `authType`, `clientSecret` or `refreshToken`,
+  `environment`, `companyId`) — Entra. `authType: "s2s"` uses the client secret
+  (the normal case); `authType: "user"` uses a refresh token. See
+  [Part A.4](#4-the-settings-file) for a complete example.
 
 > On-prem **data** calls (message types) are wired during tool migration; the
 > connection, auth header (`onPremAuthHeader`) and company listing are in place.
@@ -564,6 +821,10 @@ Scaffold + dual auth + tenant access guard + discovery tools are in place and
 compile/run. Next: migrate the ~40+ BC tools from the legacy server (`api/mcp/tools/*`)
 into `src/tools/`, then deploy to dev via Azure DevOps.
 
+Further notes live in the `docs/` folder of the source repository on Azure DevOps
+(`BC-PTE-CloudEvents` → **Cloud Events MCP**). They are not part of this published
+package:
+
 - **`docs/PROJECT-STATUS.md`** — full state, decisions, tool-migration inventory,
   open questions, resume checklist.
 - **`docs/RESUME-PROMPT.md`** — ready-to-paste prompt to continue the work later.
@@ -679,14 +940,12 @@ curl http://localhost:3000/healthz
 
 ### Install from tarball
 
-The server is published to the Azure Artifacts feed `BC-PTE-CloudEvents` for
-local dev/test on Windows and macOS. If you download the package artifact as a
-tarball, use the cross-platform setup guide:
+The server is also published to the Azure Artifacts feed `BC-PTE-CloudEvents` for
+local dev/test on Windows and macOS. Installing from GitHub
+([Part A.2](#2-install-from-github)) is the simpler route and is what these
+instructions assume.
 
-- **[Setup from downloaded tarball](docs/setup-from-tarball.md)**
-
-The older feed-based guides are still available if you want npm to install
-directly from Azure Artifacts:
-
-- **[macOS feed setup guide](docs/setup-macos.md)**
-- **[Windows feed setup guide](docs/setup-windows.md)**
+If you install from the feed or from a downloaded tarball instead, the setup
+guides live in the `docs/` folder of the source repository on Azure DevOps
+(`docs/setup-from-tarball.md`, `docs/setup-macos.md`, `docs/setup-windows.md`).
+Everything from [Part B](#part-b--entra-azure) onwards is identical either way.
