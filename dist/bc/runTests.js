@@ -33,6 +33,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
+import { createConnection } from "node:net";
 import { cosmoRequest } from "../cosmo/client.js";
 const COSMO_EXEC_TEST_NOTE = "Cosmo Alpaca OpenAPI has no /Container/Exec/{id} test-runner endpoint " +
     "(only deployApp, appinfo, restartServerInstance, backup, dllCollection, eventlog, prepareForBaseApp). " +
@@ -787,6 +788,57 @@ export function sshUsable(ssh) {
     // ipAddress + RSA privateKey are already present. Gate on credentials, not available.
     return Boolean(ssh.ipAddress?.trim() && ssh.privateKey?.trim());
 }
+async function wait(ms) {
+    if (ms <= 0)
+        return;
+    await new Promise((resolve) => setTimeout(resolve, ms));
+}
+async function canConnectToSsh(ssh) {
+    if (!ssh.ipAddress || !ssh.privateKey)
+        return false;
+    const port = Number(ssh.port || 22);
+    return new Promise((resolve) => {
+        let settled = false;
+        const finish = (connected) => {
+            if (settled)
+                return;
+            settled = true;
+            resolve(connected);
+        };
+        const socket = createConnection({ host: ssh.ipAddress, port });
+        socket.setTimeout(2_000);
+        socket.once("connect", () => {
+            socket.destroy();
+            finish(true);
+        });
+        socket.once("timeout", () => {
+            socket.destroy();
+            finish(false);
+        });
+        socket.once("error", () => {
+            socket.destroy();
+            finish(false);
+        });
+    });
+}
+function sshNotReadyResult(ssh) {
+    return {
+        ok: false,
+        mode: "ssh",
+        exitCode: 255,
+        durationMs: 0,
+        ssh: {
+            available: ssh.available,
+            ipAddress: ssh.ipAddress,
+            port: ssh.port || "22",
+            httpStatus: ssh.httpStatus,
+        },
+        cosmoExecTestEndpoint: "none",
+        error: "Cosmo SSH endpoint did not accept TCP connections within the retry window",
+        hint: "The container may still be starting. Keep sshEnabled=true and retry bc_dev_run_tests; " +
+            "if this persists, Stop then Start the container and re-check cosmo_ssh_info.",
+    };
+}
 function sshBlockedResult(ssh) {
     return {
         ok: false,
@@ -822,29 +874,49 @@ export async function runBcTests(input, conn) {
             hint: SSH_UNAVAILABLE_HINT,
         };
     }
-    let ssh;
-    try {
-        ssh = await fetchCosmoSshInfo(containerId);
-    }
-    catch (err) {
-        return {
-            ok: false,
-            mode: "blocked",
-            exitCode: 1,
-            durationMs: 0,
-            cosmoExecTestEndpoint: "none",
-            error: `cosmo_ssh_info failed: ${err instanceof Error ? err.message : String(err)}`,
-            hint: SSH_UNAVAILABLE_HINT,
-        };
-    }
-    if (ssh.httpStatus >= 400 || !sshUsable(ssh)) {
-        return sshBlockedResult(ssh);
-    }
     // Retry SSH connect briefly — container may still be Starting after Stop→Start.
     const attempts = Math.max(1, Number(process.env.BC_DEV_SSH_RETRIES || 4));
     const delayMs = Math.max(0, Number(process.env.BC_DEV_SSH_RETRY_MS || 8000));
     let last;
     for (let i = 0; i < attempts; i++) {
+        let ssh;
+        try {
+            ssh = await fetchCosmoSshInfo(containerId);
+        }
+        catch (err) {
+            if (i === attempts - 1) {
+                return {
+                    ok: false,
+                    mode: "blocked",
+                    exitCode: 1,
+                    durationMs: 0,
+                    cosmoExecTestEndpoint: "none",
+                    error: `cosmo_ssh_info failed: ${err instanceof Error ? err.message : String(err)}`,
+                    hint: SSH_UNAVAILABLE_HINT,
+                };
+            }
+            await wait(delayMs);
+            continue;
+        }
+        if (ssh.httpStatus >= 400) {
+            if (i === attempts - 1)
+                return sshBlockedResult(ssh);
+            await wait(delayMs);
+            continue;
+        }
+        if (!sshUsable(ssh)) {
+            if (i === attempts - 1)
+                return sshBlockedResult(ssh);
+            await wait(delayMs);
+            continue;
+        }
+        if (!(await canConnectToSsh(ssh))) {
+            last = sshNotReadyResult(ssh);
+            if (i === attempts - 1)
+                return last;
+            await wait(delayMs);
+            continue;
+        }
         last = await runViaSsh(input, conn, ssh);
         if (last.ok)
             return last;
@@ -853,16 +925,7 @@ ${last.stdoutPreview || ""}
 ${last.error || ""}`);
         if (!connectFail || i === attempts - 1)
             return last;
-        await new Promise((r) => setTimeout(r, delayMs));
-        // Refresh SSH info in case port/ip rotated while Starting
-        try {
-            ssh = await fetchCosmoSshInfo(containerId);
-            if (!sshUsable(ssh))
-                return sshBlockedResult(ssh);
-        }
-        catch {
-            /* keep prior ssh */
-        }
+        await wait(delayMs);
     }
     return last;
 }
