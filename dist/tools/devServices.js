@@ -1,8 +1,9 @@
 /**
  * BC Developer Services MCP tools — metadata, symbols, publish .app / artifacts,
- * uninstall/unpublish via Automation API, and AL unit tests (bc_dev_run_tests).
+ * uninstall/unpublish via Automation API, AL unit tests (bc_dev_run_tests), and release
+ * builds with a runtime package (bc_dev_build_runtime_package).
  *
- * Still out of scope: alc compile orchestration, container CRUD
+ * Still out of scope: general alc compile orchestration, container CRUD
  * (use Cosmo Alpaca lifecycle tools instead).
  */
 import { z } from "zod";
@@ -13,6 +14,7 @@ import { getAuthContext } from "../auth/context.js";
 import { resolveTarget, json } from "../bc/runtime.js";
 import { resolveDeveloperBaseUrl, bcDevRequest, findExtensions, automationBoundAction, automationAuthError, defaultSymbolsDir, defaultArtifactDir, downloadToFile, extractAppsFromZip, schemaUpdateModeQuery, tenantQuery, buildAppMultipart, readAppBytes, } from "../bc/developer.js";
 import { runBcTests } from "../bc/runTests.js";
+import { buildRuntimePackage } from "../bc/runtimePackage.js";
 const schemaUpdateModeEnum = z
     .enum(["Synchronize", "Recreate", "ForceSync", "synchronize", "recreate", "forcesync"])
     .optional()
@@ -250,6 +252,50 @@ export function registerDevServicesTools(server) {
         const result = await publishAppFile(pathToPublish, {
             tenant,
             schemaUpdateMode: normalizeSchemaMode(schemaUpdateMode),
+        });
+        return json(result);
+    });
+    // ── bc_dev_build_runtime_package ──────────────────────────────────────────
+    server.registerTool("bc_dev_build_runtime_package", {
+        title: "Release build + runtime package (no internalsVisibleTo)",
+        description: "One step: copy the AL project to a temp folder, remove internalsVisibleTo (and AS0081) from the " +
+            "copy's app.json, compile with the local alc.exe + analyzers, publish through the dev endpoint of the " +
+            "session's connection, then SSH into the Cosmo container (containerId) and run Get-NAVAppRuntimePackage. " +
+            "Writes <Publisher>_<Name>_<Version>.app and .runtime.app side by side (default <projectPath>/output/release). " +
+            "The working tree is never modified; schemaUpdateMode defaults to ForceSync here. " +
+            "containerId must be the container the connection publishes to. " +
+            "Publishing replaces the app in that container — a test app that relied on internalsVisibleTo stops " +
+            "compiling against it until the test build is republished.",
+        inputSchema: {
+            projectPath: z.string().describe("AL project folder containing app.json (e.g. D:/Git/Private/bc-origo-bifrost-core/app)."),
+            containerId: z.string().describe("Cosmo container id (see cosmo tools) — needed for SSH."),
+            outputDir: z.string().optional().describe("Output folder for .app + .runtime.app (default <projectPath>/output/release)."),
+            alcPath: z.string().optional().describe("alc.exe path (default AL_COMPILER_PATH, then newest VS Code AL extension)."),
+            packageCachePath: z.string().optional().describe("Symbols folder (default <projectPath>/.alpackages)."),
+            analyzers: z
+                .array(z.enum(["CodeCop", "UICop", "AppSourceCop", "PerTenantExtensionCop"]))
+                .optional()
+                .describe("Analyzers for the compile (default CodeCop, UICop, AppSourceCop; [] for none)."),
+            dropSuppressWarnings: z
+                .array(z.string())
+                .optional()
+                .describe("Suppressions removed with internalsVisibleTo (default [\"AS0081\"])."),
+            tenant: z.string().optional(),
+            schemaUpdateMode: schemaUpdateModeEnum,
+            sshUser: z.string().optional(),
+            timeoutMs: z.number().int().positive().optional(),
+        },
+    }, async (input) => {
+        const result = await buildRuntimePackage(input, async (appFile) => {
+            const published = await publishAppFile(appFile, {
+                tenant: input.tenant,
+                schemaUpdateMode: input.schemaUpdateMode ?? "ForceSync",
+            });
+            return {
+                ok: published.ok === true,
+                statusCode: typeof published.statusCode === "number" ? published.statusCode : undefined,
+                error: typeof published.error === "string" ? published.error : published.error ? JSON.stringify(published.error) : undefined,
+            };
         });
         return json(result);
     });

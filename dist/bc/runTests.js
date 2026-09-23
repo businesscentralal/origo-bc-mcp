@@ -136,7 +136,7 @@ export function parseConsoleSummary(text) {
         undefined;
     return { passed, failed, skipped, failures };
 }
-function runProcess(command, args, opts) {
+export function runProcess(command, args, opts) {
     const start = Date.now();
     return new Promise((resolve) => {
         const child = spawn(command, args, {
@@ -504,6 +504,25 @@ export function sshClientOpts(keyPath, port) {
         port,
     ];
 }
+/** Shared OpenSSH scp options (scp takes the port as -P; never includes privateKey material). */
+export function scpClientOpts(keyPath, port) {
+    return [
+        "-i",
+        keyPath,
+        "-P",
+        port,
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "BatchMode=yes",
+        "-o",
+        "IdentitiesOnly=yes",
+        "-o",
+        "ConnectTimeout=8",
+    ];
+}
 /** Remote temp path for the uploaded run-tests.ps1 (Windows Cosmo host). */
 export function remoteRunTestsPath(id) {
     const name = `origo-bc-run-tests-${id}.ps1`;
@@ -569,23 +588,7 @@ async function runViaSsh(input, conn, ssh) {
         `ssh -i <key> -p ${port} ${target} pwsh|powershell -NoProfile -File ${remoteWinPath}` +
         `  # extensionId=${input.extensionId ?? ""} in-container Client Services`;
     const sshOpts = sshClientOpts(keyPath, port);
-    // scp uses -P for port; strip ssh's -p and rebuild
-    const scpOpts = [
-        "-i",
-        keyPath,
-        "-P",
-        port,
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null",
-        "-o",
-        "BatchMode=yes",
-        "-o",
-        "IdentitiesOnly=yes",
-        "-o",
-        "ConnectTimeout=8",
-    ];
+    const scpOpts = scpClientOpts(keyPath, port);
     const wipeLocal = () => {
         try {
             rmSync(dir, { recursive: true, force: true });
@@ -788,7 +791,7 @@ export function sshUsable(ssh) {
     // ipAddress + RSA privateKey are already present. Gate on credentials, not available.
     return Boolean(ssh.ipAddress?.trim() && ssh.privateKey?.trim());
 }
-async function wait(ms) {
+export async function wait(ms) {
     if (ms <= 0)
         return;
     await new Promise((resolve) => setTimeout(resolve, ms));
