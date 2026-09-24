@@ -110,4 +110,59 @@ export function cosmoErrorHint(status, body) {
     }
     return undefined;
 }
+export const REDACTED = "***REDACTED***";
+/**
+ * Names Cosmo uses for credentials: container env vars (`password=…`, `licenseFile=…`),
+ * create/update bodies (`password`) and SSH info (`privateKey`). Matched case-insensitively
+ * against the whole name, after dropping `_`, `-` and `.`.
+ */
+const SECRET_NAME_RE = /(password|passwd|pwd|secret|privatekey|token|apikey|accesskey|connectionstring|licensefile|sas)$/i;
+export function isSecretName(name) {
+    return SECRET_NAME_RE.test(name.replace(/[_\-.]/g, ""));
+}
+/** `NAME=value` env strings (Cosmo `envs` arrays) with a secret NAME. */
+function redactEnvString(value) {
+    const eq = value.indexOf("=");
+    if (eq <= 0)
+        return value;
+    return isSecretName(value.slice(0, eq)) ? `${value.slice(0, eq + 1)}${REDACTED}` : value;
+}
+/**
+ * Deep copy of a Cosmo response with every credential replaced by REDACTED, so tool results
+ * never hand a container password, license SAS URL or SSH private key to the model. Covers
+ * secret-named keys, `NAME=value` strings and `{ name, value }` env pairs.
+ */
+export function redactCosmoSecrets(value) {
+    const walk = (v) => {
+        if (typeof v === "string")
+            return redactEnvString(v);
+        if (Array.isArray(v))
+            return v.map(walk);
+        if (v && typeof v === "object") {
+            const obj = v;
+            const out = {};
+            const pairName = typeof obj.name === "string" ? obj.name : undefined;
+            for (const [k, child] of Object.entries(obj)) {
+                if (child !== null && child !== undefined && child !== "" && typeof child !== "object" && isSecretName(k)) {
+                    out[k] = REDACTED;
+                }
+                else if (k === "value" && pairName && isSecretName(pairName) && typeof child === "string") {
+                    out[k] = REDACTED;
+                }
+                else {
+                    out[k] = walk(child);
+                }
+            }
+            return out;
+        }
+        return v;
+    };
+    return walk(value);
+}
+/** Same rule for raw response text (error paths echo it): JSON pairs and NAME=value pairs. */
+export function redactCosmoText(text) {
+    return text
+        .replace(/"([^"\\]+)"(\s*:\s*)"((?:[^"\\]|\\.)*)"/g, (m, name, sep) => isSecretName(name) ? `"${name}"${sep}"${REDACTED}"` : m)
+        .replace(/([A-Za-z][A-Za-z0-9_.\-]*)=([^\s,;&"'}\]]+)/g, (m, name) => isSecretName(name) ? `${name}=${REDACTED}` : m);
+}
 //# sourceMappingURL=client.js.map

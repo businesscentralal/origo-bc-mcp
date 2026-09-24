@@ -4,7 +4,7 @@
  */
 import { z } from "zod";
 import { json } from "../bc/runtime.js";
-import { cosmoRequest, cosmoErrorHint, deriveBcEndpoints, getCosmoConfig, } from "../cosmo/client.js";
+import { cosmoRequest, cosmoErrorHint, deriveBcEndpoints, getCosmoConfig, redactCosmoSecrets, redactCosmoText, } from "../cosmo/client.js";
 const backendUrlField = z
     .string()
     .optional()
@@ -28,8 +28,12 @@ function resultPayload(res, extra) {
         durationMs: res.durationMs,
         url: res.url,
         ok: res.status >= 200 && res.status < 300,
-        body: res.body,
-        ...(hint ? { error: hint } : res.status >= 400 ? { error: res.rawText.slice(0, 500) || res.body } : {}),
+        body: redactCosmoSecrets(res.body),
+        ...(hint
+            ? { error: hint }
+            : res.status >= 400
+                ? { error: redactCosmoText(res.rawText.slice(0, 500)) || redactCosmoSecrets(res.body) }
+                : {}),
         ...extra,
     };
 }
@@ -226,7 +230,9 @@ export function registerCosmoTools(server) {
     // ── cosmo_ssh_info ────────────────────────────────────────────────────────
     server.registerTool("cosmo_ssh_info", {
         title: "Get Cosmo container SSH info",
-        description: "GET /Container/Ssh/{containerId}. Use for SSH Uninstall-NavApp / Unpublish-NavApp fallback after Automation API.",
+        description: "GET /Container/Ssh/{containerId}. Use for SSH Uninstall-NavApp / Unpublish-NavApp fallback after Automation API. " +
+            "The private key is never returned: privateKeyPresent says whether SSH is usable (bc_dev_run_tests " +
+            "and bc_dev_build_runtime_package read the key themselves).",
         inputSchema: {
             containerId: containerIdField,
             backendUrl: backendUrlField,
@@ -235,7 +241,12 @@ export function registerCosmoTools(server) {
         const res = await cosmoRequest("GET", `/Container/Ssh/${encodeURIComponent(containerId)}`, {
             backendUrl,
         });
-        return json(resultPayload(res));
+        const raw = res.body && typeof res.body === "object" ? res.body : {};
+        const key = raw.privateKey ?? raw.PrivateKey;
+        return json(resultPayload(res, {
+            privateKeyPresent: typeof key === "string" && key.trim().length > 0,
+            ipAddressPresent: typeof (raw.ipAddress ?? raw.host) === "string",
+        }));
     });
     // ── cosmo_restart_nst ─────────────────────────────────────────────────────
     server.registerTool("cosmo_restart_nst", {

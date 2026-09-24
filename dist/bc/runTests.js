@@ -42,7 +42,7 @@ const COSMO_EXEC_TEST_NOTE = "Cosmo Alpaca OpenAPI has no /Container/Exec/{id} t
 const SSH_UNAVAILABLE_HINT = "Cosmo SSH credentials missing (need ipAddress + privateKey from cosmo_ssh_info). " +
     "Note: available=false during Starting is normal after Stop→Start — usable SSH is keyed off ip+privateKey, not available===true. " +
     "If both are absent: (1) cosmo_update_container state=Stop, then state=Start (or delete + cosmo_create_container with sshEnabled=true), " +
-    "(2) re-check cosmo_ssh_info until ipAddress and privateKey are present, " +
+    "(2) re-check cosmo_ssh_info until ipAddressPresent and privateKeyPresent are true, " +
     "(3) retry bc_dev_run_tests. Standing bc28-is-grok may need a fresh create-with-sshEnabled=true. " +
     COSMO_EXEC_TEST_NOTE;
 function truncate(s, max = 8000) {
