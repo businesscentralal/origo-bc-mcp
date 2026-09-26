@@ -59,25 +59,45 @@ function resolveSshUser(input) {
         "sshuser");
 }
 export function parseJunit(xml) {
-    const tests = Number(xml.match(/\btests="(\d+)"/)?.[1] ?? 0);
-    const failuresN = Number(xml.match(/\bfailures="(\d+)"/)?.[1] ?? 0);
-    const errorsN = Number(xml.match(/\berrors="(\d+)"/)?.[1] ?? 0);
-    const skippedN = Number(xml.match(/\bskipped="(\d+)"/)?.[1] ?? 0);
     const failures = [];
+    let caseCount = 0;
+    let caseFailed = 0;
+    let caseErrors = 0;
+    let caseSkipped = 0;
     // Prefer self-closing testcase so attrs never swallow the trailing "/"
     const caseRe = /<testcase\b([^>]*?)\/>|<testcase\b([^>]*)>([\s\S]*?)<\/testcase>/g;
     let m;
     while ((m = caseRe.exec(xml)) !== null) {
+        caseCount++;
         const attrs = m[1] ?? m[2] ?? "";
         const body = m[3] ?? "";
         const name = attrs.match(/\bname="([^"]*)"/)?.[1] ?? "(unknown)";
         const classname = attrs.match(/\bclassname="([^"]*)"/)?.[1];
+        if (/<skipped\b/.test(body))
+            caseSkipped++;
+        if (/<failure\b/.test(body))
+            caseFailed++;
+        else if (/<error\b/.test(body))
+            caseErrors++;
         const fail = body.match(/<(?:failure|error)\b[^>]*message="([^"]*)"[^>]*(?:\/>|>([\s\S]*?)<\/(?:failure|error)>)/);
         if (fail) {
             const message = (fail[1] || fail[2] || "failed").trim().slice(0, 500);
             failures.push({ name, message, classname });
         }
     }
+    if (caseCount > 0) {
+        // Count the <testcase> elements themselves: the BC test runner writes tests="0" and the real
+        // count in total="N" on <testsuite>, and a run over several codeunits has one suite each.
+        const failed = caseFailed + caseErrors;
+        const passed = Math.max(0, caseCount - failed - caseSkipped);
+        return { passed, failed, skipped: caseSkipped, errors: caseErrors, failures: failures.slice(0, 50) };
+    }
+    // No <testcase> elements: fall back to the suite attributes, summed over every <testsuite>.
+    const sumAttr = (attr) => [...xml.matchAll(new RegExp(`<testsuite\\b[^>]*\\b${attr}="(\\d+)"`, "g"))].reduce((s, a) => s + Number(a[1]), 0);
+    const tests = Math.max(sumAttr("tests"), sumAttr("total"));
+    const failuresN = sumAttr("failures");
+    const errorsN = sumAttr("errors");
+    const skippedN = sumAttr("skipped");
     const failed = failuresN + errorsN;
     const passed = Math.max(0, tests - failed - skippedN);
     return { passed, failed, skipped: skippedN, errors: errorsN, failures: failures.slice(0, 50) };
