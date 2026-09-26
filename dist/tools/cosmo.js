@@ -5,6 +5,7 @@
 import { z } from "zod";
 import { json } from "../bc/runtime.js";
 import { cosmoRequest, cosmoErrorHint, deriveBcEndpoints, getCosmoConfig, redactCosmoSecrets, redactCosmoText, } from "../cosmo/client.js";
+import { ensureCosmoSsh } from "../cosmo/ssh.js";
 const backendUrlField = z
     .string()
     .optional()
@@ -231,6 +232,7 @@ export function registerCosmoTools(server) {
     server.registerTool("cosmo_ssh_info", {
         title: "Get Cosmo container SSH info",
         description: "GET /Container/Ssh/{containerId}. Use for SSH Uninstall-NavApp / Unpublish-NavApp fallback after Automation API. " +
+            "Read-only; to bring SSH back when it is missing use cosmo_ensure_ssh. " +
             "The private key is never returned: privateKeyPresent says whether SSH is usable (bc_dev_run_tests " +
             "and bc_dev_build_runtime_package read the key themselves).",
         inputSchema: {
@@ -247,6 +249,30 @@ export function registerCosmoTools(server) {
             privateKeyPresent: typeof key === "string" && key.trim().length > 0,
             ipAddressPresent: typeof (raw.ipAddress ?? raw.host) === "string",
         }));
+    });
+    // ── cosmo_ensure_ssh ──────────────────────────────────────────────────────
+    server.registerTool("cosmo_ensure_ssh", {
+        title: "Make Cosmo container SSH usable",
+        description: "Checks GET /Container/Ssh/{id}; when it has no ipAddress/privateKey or the port refuses TCP, " +
+            "PATCHes sshEnabled=true (or starts a stopped container with sshEnabled=true) and polls until SSH is " +
+            "usable. With allowRestart=true it Stop → Starts the container as a last resort (interrupts anyone " +
+            "using it). Returns ready, the ip/port, the steps taken and timing - never the private key. " +
+            "bc_dev_run_tests and bc_dev_build_runtime_package call this themselves (without restart).",
+        inputSchema: {
+            containerId: containerIdField,
+            waitSeconds: z
+                .number()
+                .optional()
+                .describe("How long to wait for SSH after enabling it (default BC_DEV_SSH_ENSURE_WAIT_S or 300)."),
+            pollSeconds: z.number().optional().describe("Poll interval (default 10)."),
+            allowRestart: z
+                .boolean()
+                .optional()
+                .describe("Stop → Start the container when enabling alone does not bring SSH up (default false)."),
+        },
+    }, async ({ containerId, waitSeconds, pollSeconds, allowRestart }) => {
+        const { result } = await ensureCosmoSsh(containerId, { waitSeconds, pollSeconds, allowRestart });
+        return json(result);
     });
     // ── cosmo_restart_nst ─────────────────────────────────────────────────────
     server.registerTool("cosmo_restart_nst", {

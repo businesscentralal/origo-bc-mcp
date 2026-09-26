@@ -33,8 +33,8 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomBytes } from "node:crypto";
-import { createConnection } from "node:net";
-import { cosmoRequest } from "../cosmo/client.js";
+import { canConnectToSsh, ensureCosmoSsh, fetchCosmoSshInfo, sshUsable, wait, } from "../cosmo/ssh.js";
+export { normalizeSshInfo, fetchCosmoSshInfo, sshUsable, wait } from "../cosmo/ssh.js";
 const COSMO_EXEC_TEST_NOTE = "Cosmo Alpaca OpenAPI has no /Container/Exec/{id} test-runner endpoint " +
     "(only deployApp, appinfo, restartServerInstance, backup, dllCollection, eventlog, prepareForBaseApp). " +
     "AL unit tests require SSH into the BC container; Cosmo SSH is in-container (Client Services / " +
@@ -194,33 +194,6 @@ export function runProcess(command, args, opts) {
             });
         });
     });
-}
-export function normalizeSshInfo(body, httpStatus) {
-    const obj = body && typeof body === "object" ? body : {};
-    const available = obj.available === true;
-    const ipAddress = typeof obj.ipAddress === "string"
-        ? obj.ipAddress
-        : typeof obj.host === "string"
-            ? obj.host
-            : undefined;
-    const port = obj.port !== undefined && obj.port !== null ? String(obj.port) : undefined;
-    const privateKey = typeof obj.privateKey === "string"
-        ? obj.privateKey
-        : typeof obj.PrivateKey === "string"
-            ? obj.PrivateKey
-            : undefined;
-    return {
-        available,
-        ipAddress: ipAddress?.trim() || undefined,
-        port: port?.trim() || undefined,
-        privateKey: privateKey?.trim() || undefined,
-        httpStatus,
-        rawKeys: Object.keys(obj),
-    };
-}
-export async function fetchCosmoSshInfo(containerId) {
-    const res = await cosmoRequest("GET", `/Container/Ssh/${encodeURIComponent(containerId)}`);
-    return normalizeSshInfo(res.body, res.status);
 }
 /** Resolve vendored PsTestFunctions + ClientContext next to compiled JS (or src checkout). */
 export function resolvePsTestHelperPaths() {
@@ -806,44 +779,6 @@ async function runHelperLocal(input, conn) {
         commandPreview: `${pwsh} -File run-tests.ps1 # containerName=${containerName}`,
     };
 }
-export function sshUsable(ssh) {
-    // Architect: after Stop→Start, available may stay false while Starting even when
-    // ipAddress + RSA privateKey are already present. Gate on credentials, not available.
-    return Boolean(ssh.ipAddress?.trim() && ssh.privateKey?.trim());
-}
-export async function wait(ms) {
-    if (ms <= 0)
-        return;
-    await new Promise((resolve) => setTimeout(resolve, ms));
-}
-async function canConnectToSsh(ssh) {
-    if (!ssh.ipAddress || !ssh.privateKey)
-        return false;
-    const port = Number(ssh.port || 22);
-    return new Promise((resolve) => {
-        let settled = false;
-        const finish = (connected) => {
-            if (settled)
-                return;
-            settled = true;
-            resolve(connected);
-        };
-        const socket = createConnection({ host: ssh.ipAddress, port });
-        socket.setTimeout(2_000);
-        socket.once("connect", () => {
-            socket.destroy();
-            finish(true);
-        });
-        socket.once("timeout", () => {
-            socket.destroy();
-            finish(false);
-        });
-        socket.once("error", () => {
-            socket.destroy();
-            finish(false);
-        });
-    });
-}
 function sshNotReadyResult(ssh) {
     return {
         ok: false,
@@ -897,6 +832,37 @@ export async function runBcTests(input, conn) {
             hint: SSH_UNAVAILABLE_HINT,
         };
     }
+    // Make SSH usable first: the endpoint can drop out while the container runs, and enabling it
+    // takes a minute or two to come back.
+    let sshEnsure;
+    if (input.ensureSsh !== false) {
+        const first = await fetchCosmoSshInfo(containerId).catch(() => undefined);
+        if (!first || first.httpStatus >= 400 || !sshUsable(first) || !(await canConnectToSsh(first))) {
+            const ensured = await ensureCosmoSsh(containerId, {
+                waitSeconds: input.sshWaitSeconds,
+                allowRestart: input.allowRestart,
+            });
+            sshEnsure = ensured.result;
+            if (!ensured.result.ready) {
+                return {
+                    ok: false,
+                    mode: "blocked",
+                    exitCode: 1,
+                    durationMs: ensured.result.elapsedMs,
+                    cosmoExecTestEndpoint: "none",
+                    ssh: {
+                        available: ensured.result.available ?? false,
+                        ipAddress: ensured.result.ipAddress,
+                        port: ensured.result.port,
+                    },
+                    error: ensured.result.error ?? "Cosmo SSH is not usable.",
+                    hint: ensured.result.hint ?? SSH_UNAVAILABLE_HINT,
+                    sshEnsure,
+                };
+            }
+        }
+    }
+    const withEnsure = (r) => (sshEnsure ? { ...r, sshEnsure } : r);
     // Retry SSH connect briefly — container may still be Starting after Stop→Start.
     const attempts = Math.max(1, Number(process.env.BC_DEV_SSH_RETRIES || 4));
     const delayMs = Math.max(0, Number(process.env.BC_DEV_SSH_RETRY_MS || 8000));
@@ -940,7 +906,7 @@ export async function runBcTests(input, conn) {
             await wait(delayMs);
             continue;
         }
-        last = await runViaSsh(input, conn, ssh);
+        last = withEnsure(await runViaSsh(input, conn, ssh));
         if (last.ok)
             return last;
         const connectFail = /Connection refused|Connection timed out|No route to host|Connection reset|Permission denied|timed out after/i.test(`${last.stderrPreview || ""}

@@ -23,7 +23,7 @@ Origo Business Central MCP server — connects AI clients (VS Code Copilot, Clau
 | Business events | `list_bc_business_event_definitions`, `list_bc_business_event_subscriptions`, `create_bc_business_event_subscription`, `delete_bc_business_event_subscription`, `renew_bc_business_event_subscription` | Manage `[ExternalBusinessEvent]` subscriptions |
 | **API/OData testing** | `bc_list_api_endpoints`, `bc_get_api_metadata`, `bc_api_request` | Discover, inspect, and test any BC API v2.0 or custom API page endpoint — full CRUD (GET/POST/PATCH/DELETE), `$metadata` parsing (fields, keys, nav properties), and OData query support (`$filter`, `$select`, `$top`, `$orderby`, `$expand`) |
 | **Developer Services** | `bc_dev_get_metadata`, `bc_dev_get_symbols`, `bc_dev_publish_app`, `bc_dev_publish_artifact`, `bc_dev_uninstall_app`, `bc_dev_unpublish_app`, `bc_dev_run_tests` | AL publish/cleanup against BC Developer Services + Automation API; Cosmo SSH unit tests |
-| **Cosmo Alpaca** | `cosmo_list_containers`, `cosmo_get_container`, `cosmo_create_container`, `cosmo_update_container`, `cosmo_delete_container`, `cosmo_deploy_app`, `cosmo_get_app_info`, `cosmo_ssh_info`, `cosmo_restart_nst`, `cosmo_whoami_config` | Cosmo Alpaca container lifecycle, feed deploy, SSH info, NST restart (Bearer; independent of BC auth) |
+| **Cosmo Alpaca** | `cosmo_list_containers`, `cosmo_get_container`, `cosmo_create_container`, `cosmo_update_container`, `cosmo_delete_container`, `cosmo_deploy_app`, `cosmo_get_app_info`, `cosmo_ssh_info`, `cosmo_ensure_ssh`, `cosmo_restart_nst`, `cosmo_whoami_config` | Cosmo Alpaca container lifecycle, feed deploy, SSH info and recovery, NST restart (Bearer; independent of BC auth) |
 | Skills | `get_cloud_events_api_skill` | Bundled reference docs for the Cloud Events API |
 
 ## Installation overview
@@ -724,7 +724,7 @@ These talk to a container's `{id}dev` / Automation endpoints — not the Cosmo A
 
 **Uninstall / unpublish:** prefer Automation API (`bc_dev_uninstall_app` / `bc_dev_unpublish_app`). If those fail or the container only allows SSH ops, use `cosmo_ssh_info` then `Uninstall-NavApp` / `Unpublish-NavApp` over SSH.
 
-**`bc_dev_run_tests`:** prefers Cosmo SSH (`GET /Container/Ssh/{id}`). SSH is **usable when `ipAddress` and `privateKey` are present** — do **not** require `available===true` (`available=false` is expected while Starting after Stop→Start). Connects as `sshuser` with `privateKey` (never logged). Remote invoke is **`scp` of local `run-tests.ps1` (+ vendored `PsTestFunctions.ps1` / `ClientContext.ps1`) → `C:\Windows\Temp\…`, then `pwsh -NoProfile -File <remote>`** (fallback `powershell.exe -File`); best-effort remote delete afterward. **Do not** pipe the script on stdin to `pwsh -Command -` (Cosmo Windows OpenSSH aborts after the first `Write-Host`).
+**`bc_dev_run_tests`:** prefers Cosmo SSH (`GET /Container/Ssh/{id}`). SSH is **usable when `ipAddress` and `privateKey` are present** — do **not** require `available===true` (`available=false` is expected while Starting after Stop→Start). Connects as `sshuser` with `privateKey` (never logged). **SSH recovery:** the Cosmo SSH endpoint can drop out while the container keeps running (the container record has no ssh flag). Before a run `bc_dev_run_tests` (and `bc_dev_build_runtime_package`) therefore enable SSH and wait for it (`ensureSsh`, default on; `sshWaitSeconds`, default `BC_DEV_SSH_ENSURE_WAIT_S` or 300; `allowRestart=true` also permits Stop → Start). The result's `sshEnsure` lists what was done. Remote invoke is **`scp` of local `run-tests.ps1` (+ vendored `PsTestFunctions.ps1` / `ClientContext.ps1`) → `C:\Windows\Temp\…`, then `pwsh -NoProfile -File <remote>`** (fallback `powershell.exe -File`); best-effort remote delete afterward. **Do not** pipe the script on stdin to `pwsh -Command -` (Cosmo Windows OpenSSH aborts after the first `Write-Host`).
 
 **Cosmo SSH is inside the BC container** (not a Docker host). Host-side `Invoke-NavContainerTests` / `Run-TestsInBcContainer` / `Run-AlTests` usually do **not** exist there. The remote script therefore:
 
@@ -789,7 +789,8 @@ export COSMO_BEARER_TOKEN='…'   # preferred over committing bearerToken
 | `cosmo_delete_container` | `DELETE /Container/Container/{id}` | Tear down ephemeral containers |
 | `cosmo_deploy_app` | `POST /Container/Exec/{id}/deployApp` | Install from **NuGet | Azure DevOps feeds only** |
 | `cosmo_get_app_info` | `GET /Container/Exec/{id}/appinfo` | Installed app info blob from the container |
-| `cosmo_ssh_info` | `GET /Container/Ssh/{id}` | SSH endpoint/credentials for NavApp fallback |
+| `cosmo_ssh_info` | `GET /Container/Ssh/{id}` | SSH endpoint/credentials for NavApp fallback (read-only) |
+| `cosmo_ensure_ssh` | `GET /Container/Ssh/{id}` + `PATCH /Container/Container/{id}` | Makes SSH usable: enables it (or starts a stopped container with `sshEnabled=true`), polls until ip + key + TCP are there; `allowRestart=true` also permits Stop → Start. Returns the steps taken, never the key |
 | `cosmo_restart_nst` | `POST /Container/Exec/{id}/restartServerInstance` | Restart NST after stubborn publish/uninstall issues |
 | `cosmo_whoami_config` | (local) | Confirm backend + token configured (no secret echo) |
 

@@ -19,7 +19,8 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, 
 import { createHash, randomBytes } from "node:crypto";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
-import { fetchCosmoSshInfo, runProcess, scpClientOpts, sshClientOpts, sshUsable, wait, } from "./runTests.js";
+import { runProcess, scpClientOpts, sshClientOpts } from "./runTests.js";
+import { ensureCosmoSsh } from "../cosmo/ssh.js";
 const ALL_ANALYZERS = {
     CodeCop: "Microsoft.Dynamics.Nav.CodeCop.dll",
     UICop: "Microsoft.Dynamics.Nav.UICop.dll",
@@ -215,23 +216,11 @@ async function compile(alcPath, args, appFile, timeoutMs) {
     };
 }
 async function sshInfoWithRetry(containerId) {
-    const attempts = Math.max(1, Number(process.env.BC_DEV_SSH_RETRIES || 4));
-    const delayMs = Math.max(0, Number(process.env.BC_DEV_SSH_RETRY_MS || 8000));
-    let lastError = "";
-    for (let i = 0; i < attempts; i++) {
-        try {
-            const info = await fetchCosmoSshInfo(containerId);
-            if (sshUsable(info))
-                return info;
-            lastError = `cosmo_ssh_info has no ipAddress/privateKey (keys: ${info.rawKeys.join(", ")})`;
-        }
-        catch (err) {
-            lastError = `cosmo_ssh_info failed: ${err instanceof Error ? err.message : String(err)}`;
-        }
-        if (i < attempts - 1)
-            await wait(delayMs);
-    }
-    return lastError;
+    // Enable SSH and wait for it when the endpoint is missing; never restarts the container here.
+    const ensured = await ensureCosmoSsh(containerId);
+    if (ensured.result.ready && ensured.info)
+        return ensured.info;
+    return ensured.result.error ?? "Cosmo SSH is not usable";
 }
 /** Runs the whole release build. `publish` posts the .app to the session's dev endpoint. */
 export async function buildRuntimePackage(input, publish) {

@@ -551,8 +551,8 @@ export function registerDevServicesTools(server) {
             "Preferred: Cosmo SSH when cosmo_ssh_info has ipAddress+privateKey (available flag ignored — " +
             "available=false during Starting is OK). SSH as sshuser with privateKey (never logged) and " +
             "invoke Invoke-NavContainerTests / Run-TestsInBcContainer / Run-AlTests; brief retries on connect fail. " +
-            "If ip/key missing: clear blocked error (no silent fallback) with Stop→Start " +
-            "recreate + create-with-sshEnabled=true hints. " +
+            "If ip/key missing it enables SSH and waits for it (ensureSsh, default on; allowRestart=true also " +
+            "permits Stop→Start); the result's sshEnsure lists what was done. Only then a clear blocked error. " +
             "Cosmo has no /Container/Exec/{id} test-runner endpoint (only deployApp/appinfo/restartServerInstance/…). " +
             "mode=helper is local-docker only (containerName). Reuses stdio/devConnection NavUserPassword auth. " +
             "Returns structured passed/failed/skipped + failure messages (not megabyte dumps). " +
@@ -594,6 +594,18 @@ export function registerDevServicesTools(server) {
                 .number()
                 .optional()
                 .describe("Kill the SSH/PowerShell run after this many ms (default 900000 = 15 min)."),
+            ensureSsh: z
+                .boolean()
+                .optional()
+                .describe("When SSH is missing, enable it and wait for it before running (default true)."),
+            sshWaitSeconds: z
+                .number()
+                .optional()
+                .describe("How long ensureSsh waits after enabling SSH (default BC_DEV_SSH_ENSURE_WAIT_S or 300)."),
+            allowRestart: z
+                .boolean()
+                .optional()
+                .describe("Let ensureSsh Stop → Start the container as a last resort (default false)."),
         },
     }, async (args) => {
         const ctx = getAuthContext();
