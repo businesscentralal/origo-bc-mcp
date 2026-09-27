@@ -125,6 +125,26 @@ export async function resolveTarget(overrides) {
         company = companies[0];
     return { tenantId, environment, companyId: company.id, companyName: company.displayName };
 }
+/** Structured error fields a Bifrost error response can carry (#138). */
+const STRUCTURED_ERROR_KEYS = ["code", "parameter", "received", "expected", "nextStep", "errors", "warnings"];
+/**
+ * Builds the error raised for a BC `status: "Error"` response. A structured Bifrost error
+ * (`code`, `parameter`, `errors[]`, ...) is passed through whole as JSON, so the caller sees every
+ * field and every collected error; a plain one keeps its `error` text.
+ */
+export function bcResponseError(result) {
+    const structured = STRUCTURED_ERROR_KEYS.some((k) => k in result);
+    const errMsg = structured
+        ? JSON.stringify(result)
+        : Array.isArray(result.error)
+            ? JSON.stringify(result.error)
+            : String(result.error || JSON.stringify(result));
+    const err = new Error(errMsg);
+    if (Array.isArray(result.error))
+        err.bcErrors = result.error;
+    err.bcResponse = result;
+    return err;
+}
 export async function bcTask(tenantId, environment, companyId, envelope) {
     const ctx = getAuthContext();
     let auth;
@@ -147,15 +167,8 @@ export async function bcTask(tenantId, environment, companyId, envelope) {
     dbg(`POST ${taskUrl}`);
     const task = (await res.json());
     dbg(`  status=${task.status}${task.data ? " (has data URL)" : ""}`);
-    if (task.status === "Error") {
-        const errMsg = Array.isArray(task.error)
-            ? JSON.stringify(task.error)
-            : String(task.error || JSON.stringify(task));
-        const err = new Error(errMsg);
-        if (Array.isArray(task.error))
-            err.bcErrors = task.error;
-        throw err;
-    }
+    if (task.status === "Error")
+        throw bcResponseError(task);
     // If the task returns a data URL, follow it
     if (!task.data)
         return task;
@@ -200,15 +213,8 @@ export async function bcTask(tenantId, environment, companyId, envelope) {
     catch {
         return { result: raw };
     }
-    if (result.status === "Error") {
-        const errMsg = Array.isArray(result.error)
-            ? JSON.stringify(result.error)
-            : String(result.error || JSON.stringify(result));
-        const err = new Error(errMsg);
-        if (Array.isArray(result.error))
-            err.bcErrors = result.error;
-        throw err;
-    }
+    if (result.status === "Error")
+        throw bcResponseError(result);
     return result;
 }
 // ── bcQueuePost — POST to BC's /queues endpoint ─────────────────────────────
