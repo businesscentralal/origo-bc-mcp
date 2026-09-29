@@ -8,11 +8,13 @@
  * 2. **JSON array** (Foundation core#183): `{ status, result: [ { name, …catalogue fields…, markdown } ] }`.
  *    The markdown ends with a shared "Errors and warnings" section.
  * 3. **Chapters** (Foundation core#194, message type contracts): the same array, but a type with a
- *    contract (`hasContract: true`) returns its help as separate JSON chapters (`envelope`, `parameters`,
- *    `errors`, `effect`, …) and no `markdown`; a type without one still returns `markdown`. The shared
- *    "Errors and warnings" text comes once per call as `conventions.errorsAndWarnings`.
+ *    contract returns its help as separate JSON chapters (`envelope`, `parameters`, `errors`, `effect`, …),
+ *    followed by `markdown` only when the type has text the chapters have no place for (core#192); a type
+ *    without a contract still returns its whole help as `markdown`. The shared "Errors and warnings" text
+ *    comes once per call as `conventions.errorsAndWarnings`.
  *
- * Nothing here keys on a version: the shape of the response decides.
+ * Nothing here keys on a version or a flag: the keys of the element decide (Foundation has no
+ * `hasContract` since core#192).
  */
 /** The chapter keys a contract type may return (core#143). */
 export const CHAPTER_KEYS = [
@@ -38,7 +40,6 @@ const CATALOGUE_KEYS = [
     "messageDirection",
     "keywords",
     "chargeable",
-    "hasContract",
 ];
 /** An element-level error: the name was not found among several requested ones. */
 export class HelpElementError extends Error {
@@ -86,11 +87,13 @@ function fromElement(element, response) {
     const help = { contract: "json", format: "summary", catalogue };
     const markdown = typeof element.markdown === "string" ? element.markdown : undefined;
     // `metering` is built by Foundation for every type, so on its own it does not make a type a
-    // chapter type; `hasContract` (or any other chapter) does.
+    // chapter type; any other chapter does. A chapter type's `markdown` is only what follows the chapters.
     const hasOwnChapters = Object.keys(chapters).some((key) => key !== "metering");
-    if (element.hasContract === true || (hasOwnChapters && markdown === undefined)) {
+    if (hasOwnChapters) {
         help.format = "chapters";
         help.chapters = chapters;
+        if (markdown !== undefined)
+            help.markdown = markdown;
     }
     else if (markdown !== undefined) {
         help.format = "markdown";
@@ -141,11 +144,17 @@ export function normalizeImplementationHelp(response, messageType) {
 }
 /**
  * The help as one text, for places that can only show text (an error message, a log line).
- * Markdown as it is; chapters as indented JSON; the shared conventions appended once.
+ * Markdown as it is; chapters as indented JSON, then the text that follows them; the shared
+ * conventions appended once.
  */
 export function helpAsText(help) {
     const parts = [];
-    if (help.markdown !== undefined) {
+    if (help.format === "chapters" && help.chapters !== undefined) {
+        parts.push(JSON.stringify(help.chapters, null, 2));
+        if (help.markdown !== undefined)
+            parts.push(help.markdown);
+    }
+    else if (help.markdown !== undefined) {
         parts.push(help.markdown);
     }
     else if (help.chapters !== undefined) {

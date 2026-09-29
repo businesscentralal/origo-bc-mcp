@@ -77,7 +77,8 @@ export function registerMessageTypeTools(server) {
         title: "Get message type help",
         description: "Gets detailed help for a specific message type — description, parameters, examples, and usage patterns. " +
             "The answer has `format`: `markdown` (the whole help document in `markdown`) or `chapters` " +
-            "(separate JSON chapters such as envelope, parameters, errors and effect in `chapters`). " +
+            "(separate JSON chapters such as envelope, parameters, errors and effect in `chapters`, plus `markdown` " +
+            "only when the type has text that follows the chapters). " +
             "`conventions` (when present) is the shared error and warning contract that applies to every type.",
         inputSchema: {
             messageType: z.string().describe("The message type to get help for (e.g. 'Data.Records.Get')."),
@@ -87,9 +88,10 @@ export function registerMessageTypeTools(server) {
                 .describe("summary: catalogue row only. use: what is needed to make the first call (envelope, target, parameters, errors, effect, metering). " +
                 "full (default): everything. Ignored by apps that only return a markdown document."),
             chapters: z
-                .array(z.enum(CHAPTER_KEYS))
+                .array(z.enum([...CHAPTER_KEYS, "markdown"]))
                 .optional()
-                .describe("Exactly these chapters. Use instead of detail. Ignored by apps that only return a markdown document."),
+                .describe("Exactly these chapters; `markdown` is the text that follows them. Use instead of detail. " +
+                "Ignored by apps that only return a markdown document."),
             lcid: z.number().int().optional(),
             companyId: z.string().optional(),
         },
