@@ -3,6 +3,7 @@
  */
 import { z } from "zod";
 import { resolveTarget, bcTask, bcQueuePost, json } from "../bc/runtime.js";
+import { CHAPTER_KEYS, helpAsText, normalizeImplementationHelp } from "../bc/implementationHelp.js";
 const MCP_SOURCE = "Origo-BC Cloud Events MCP";
 export function registerMessageTypeTools(server) {
     server.registerTool("list_message_types", {
@@ -74,22 +75,48 @@ export function registerMessageTypeTools(server) {
     });
     server.registerTool("get_message_type_help", {
         title: "Get message type help",
-        description: "Gets detailed help for a specific message type — description, parameters, examples, and usage patterns.",
+        description: "Gets detailed help for a specific message type — description, parameters, examples, and usage patterns. " +
+            "The answer has `format`: `markdown` (the whole help document in `markdown`) or `chapters` " +
+            "(separate JSON chapters such as envelope, parameters, errors and effect in `chapters`). " +
+            "`conventions` (when present) is the shared error and warning contract that applies to every type.",
         inputSchema: {
             messageType: z.string().describe("The message type to get help for (e.g. 'Data.Records.Get')."),
+            detail: z
+                .enum(["summary", "use", "full"])
+                .optional()
+                .describe("summary: catalogue row only. use: what is needed to make the first call (envelope, target, parameters, errors, effect, metering). " +
+                "full (default): everything. Ignored by apps that only return a markdown document."),
+            chapters: z
+                .array(z.enum(CHAPTER_KEYS))
+                .optional()
+                .describe("Exactly these chapters. Use instead of detail. Ignored by apps that only return a markdown document."),
             lcid: z.number().int().optional(),
             companyId: z.string().optional(),
         },
-    }, async ({ messageType, lcid, companyId }) => {
+    }, async ({ messageType, detail, chapters, lcid, companyId }) => {
         const t = await resolveTarget({ companyId });
+        // Only send data when the caller asked for a selection: apps on the markdown contract ignore it,
+        // and the JSON contract rejects detail and chapters together, so chapters wins.
+        const requestData = {};
+        if (chapters && chapters.length > 0)
+            requestData.chapters = chapters;
+        else if (detail)
+            requestData.detail = detail;
         const result = await bcTask(t.tenantId, t.environment, t.companyId, {
             specversion: "1.0",
             type: "Help.Implementation.Get",
             source: MCP_SOURCE,
             subject: String(messageType),
+            ...(Object.keys(requestData).length > 0 ? { data: JSON.stringify(requestData) } : {}),
             ...(lcid != null ? { lcid } : {}),
         });
-        return json({ company: t.companyName, messageType: String(messageType), ...result });
+        const help = normalizeImplementationHelp(result, String(messageType));
+        return json({
+            company: t.companyName,
+            messageType: String(messageType),
+            status: "Success",
+            ...help,
+        });
     });
     server.registerTool("invoke_message_type", {
         title: "Invoke message type",
@@ -138,7 +165,8 @@ export function registerMessageTypeTools(server) {
                     source: MCP_SOURCE,
                     subject: String(msgType),
                 });
-                helpText = JSON.stringify(helpResult, null, 2);
+                // Markdown and JSON help contracts alike: show the document or the chapters, not the envelope.
+                helpText = helpAsText(normalizeImplementationHelp(helpResult, String(msgType)));
             }
             catch { /* ignore */ }
             const errMsg = err.message;
