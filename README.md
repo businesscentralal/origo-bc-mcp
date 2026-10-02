@@ -15,7 +15,7 @@ Origo Business Central MCP server — connects AI clients (VS Code Copilot, Clau
 | Totals & aging | `get_record_count`, `get_decimal_total`, `compute_customer_aging`, `compute_vendor_aging`, `compute_period_breakdown`, `compute_period_to_date` | Aggregations without pulling raw rows |
 | Message types | `list_message_types`, `get_message_type_help`, `call_message_type`, `invoke_message_type` (lite) | Generic access to any BC Cloud Event message type |
 | Queue | `queue_get_status`, `queue_retry`, `queue_cancel` | Manage async Cloud Event queue tasks |
-| Translations | `list_translations`, `get_field_translations`, `get_field_translation`, `set_field_translation`, `set_translations` | Multi-language field translation management |
+| Translations | `get_field_translations`, `get_field_translation`, `set_field_translation` | Multi-language field translation management |
 | Integration timestamps | `get_integration_timestamp`, `set_integration_timestamp`, `reverse_integration_timestamp` | Track last-sync watermarks for external integrations |
 | Memory & config | `list_company_memory`, `get_company_memory`, `set_company_memory`, `list_user_memory`, `get_user_memory`, `set_user_memory`, `get_config`, `set_config` | Persistent notes/config stored in BC's Cloud Event Config Store |
 | Incoming documents | `create_incoming_document`, `extract_incoming_document_attachments`, `process_incoming_document` | Upload and process incoming document attachments |
