@@ -6,7 +6,7 @@ import { StreamableHTTPServerTransport } from "@modelcontextprotocol/sdk/server/
 import { config } from "./config.js";
 import { authMiddleware } from "./auth/middleware.js";
 import { buildServer, buildLiteServer } from "./server.js";
-import { clearSession } from "./session/store.js";
+import { closeOnResponse, HttpSessions } from "./session/httpSessions.js";
 import { dashboardRouter, setSessionTracker } from "./dashboard/index.js";
 import { ollamaProxyRouter } from "./ollama/proxy.js";
 const debug = config.debug;
@@ -34,7 +34,17 @@ app.get("/.well-known/oauth-protected-resource", (_req, res) => {
     });
 });
 // --- Streamable HTTP transport (stateful sessions) ------------------------
-const transports = {};
+const sessions = new HttpSessions();
+const sessionCleanup = setInterval(() => void sessions.sweep(), 60_000);
+sessionCleanup.unref();
+function acquireSession(id, res) {
+    const session = sessions.acquire(id);
+    if (!session)
+        return undefined;
+    res.once("finish", session.release);
+    res.once("close", session.release);
+    return session.transport;
+}
 app.post("/mcp", authMiddleware, async (req, res) => {
     try {
         const sessionId = req.headers["mcp-session-id"];
@@ -43,9 +53,15 @@ app.post("/mcp", authMiddleware, async (req, res) => {
         const params = body?.params;
         log(`POST session=${sessionId || "NEW"} method=${method}`, params?.name ? `tool=${params.name}` : "", debug && params?.arguments ? `args=${JSON.stringify(params.arguments).slice(0, 200)}` : "");
         let transport;
-        if (sessionId && transports[sessionId]) {
+        if (sessionId) {
             // Resume an existing stateful session.
-            transport = transports[sessionId];
+            const existing = acquireSession(sessionId, res);
+            if (!existing) {
+                sessions.remove(sessionId);
+                res.status(404).json({ jsonrpc: "2.0", error: { code: -32000, message: "Session expired or not found; initialize a new session" }, id: body?.id ?? null });
+                return;
+            }
+            transport = existing;
         }
         else if (method === "initialize") {
             // Normal MCP handshake — create a stateful transport.
@@ -53,14 +69,14 @@ app.post("/mcp", authMiddleware, async (req, res) => {
                 sessionIdGenerator: () => randomUUID(),
                 onsessioninitialized: (sid) => {
                     log(`Session initialized: ${sid}`);
-                    transports[sid] = transport;
+                    sessions.add(sid, transport);
+                    acquireSession(sid, res);
                 },
             });
             transport.onclose = () => {
                 if (transport.sessionId) {
                     log(`Session closed: ${transport.sessionId}`);
-                    clearSession(transport.sessionId);
-                    delete transports[transport.sessionId];
+                    sessions.remove(transport.sessionId);
                 }
             };
             const server = createServer();
@@ -72,6 +88,7 @@ app.post("/mcp", authMiddleware, async (req, res) => {
             transport = new StreamableHTTPServerTransport({
                 sessionIdGenerator: undefined, // stateless — no session validation
             });
+            closeOnResponse(transport, res);
             const server = createServer();
             await server.connect(transport);
         }
@@ -91,19 +108,19 @@ app.post("/mcp", authMiddleware, async (req, res) => {
 // GET (server-sent stream) and DELETE (session teardown) reuse the session.
 async function sessionRequest(req, res) {
     const sessionId = req.headers["mcp-session-id"];
-    if (!sessionId || !transports[sessionId]) {
+    const transport = sessionId ? acquireSession(sessionId, res) : undefined;
+    if (!transport) {
+        if (sessionId)
+            sessions.remove(sessionId);
         res.status(400).send("Invalid or missing session id");
         return;
     }
-    await transports[sessionId].handleRequest(req, res);
+    await transport.handleRequest(req, res);
 }
 app.get("/mcp", authMiddleware, sessionRequest);
 app.delete("/mcp", authMiddleware, sessionRequest);
 // --- Dashboard (no auth — internal use) -----------------------------------
-setSessionTracker(() => Object.entries(transports).map(([id, t]) => ({
-    id,
-    created: t._createdAt ?? Date.now(),
-})));
+setSessionTracker(() => sessions.list());
 app.use("/dashboard", dashboardRouter);
 // --- Ollama proxy (normalizes tool call arguments) ------------------------
 app.use("/ollama", ollamaProxyRouter);
