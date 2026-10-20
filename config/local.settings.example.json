@@ -54,7 +54,7 @@
     }
   },
   "cosmo": {
-    "_comment": "Cosmo Alpaca API for cosmo_* tools. Prefer COSMO_BEARER_TOKEN env over bearerToken here. backendUrl must be the Alpaca API base (.../api/alpaca/release), not the bare public container host.",
+    "_comment": "Cosmo Alpaca API for cosmo_* tools. Prefer COSMO_BEARER_TOKEN env over bearerToken here, or set both in /dashboard/setup (COSMO section), which stores the token encrypted as aes:/dpapi: and never shows it again; env vars take precedence over saved values. backendUrl must be the Alpaca API base (.../api/alpaca/release), not the bare public container host.",
     "backendUrl": "https://cosmo-alpaca-enterprise.westeurope.cloudapp.azure.com/api/alpaca/release",
     "bearerToken": "env:COSMO_BEARER_TOKEN"
   }

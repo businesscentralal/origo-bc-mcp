@@ -8,6 +8,9 @@
  *   POST /api/connections  — add or update a connection
  *   POST /api/connections/validate — validate a connection without saving
  *   DELETE /api/connections/:name  — remove a connection
+ *   GET  /api/cosmo        — COSMO backend URL + whether a token is set (never the token)
+ *   POST /api/cosmo        — save COSMO backend URL / bearer token (token stored encrypted) or clear it
+ *   POST /api/cosmo/test   — read-only COSMO call (list containers) to verify URL + token
  */
 import { Router } from "express";
 import { readFileSync, writeFileSync, existsSync, mkdirSync } from "node:fs";
@@ -18,6 +21,8 @@ import { validateConnection } from "../cli/validate.js";
 import { encryptSecret, canEncryptSecrets, wrapDpapi, writeKeychain, resolveSecret } from "../config/resolveSecret.js";
 import { invalidateSettingsCache } from "../config/localSettings.js";
 import { config } from "../config.js";
+import { cosmoRequest } from "../cosmo/client.js";
+import { applyCosmoSave, cosmoEncryptionMethod, getCosmoSetupStatus, validateCosmoBackendUrl, } from "./cosmoSetup.js";
 const TOKEN_HOST = "login.microsoftonline.com";
 const BC_SCOPE = "https://api.businesscentral.dynamics.com/.default";
 const router = Router();
@@ -465,6 +470,77 @@ router.get("/api/auth-code/poll", (req, res) => {
     authCodeResults.delete(state);
     res.json(result);
 });
+// ── COSMO (Alpaca API) ───────────────────────────────────────────────────────
+// The bearer token is write-only: it is encrypted before it touches disk and no route
+// ever returns it (only whether one is set and how it is stored).
+router.get("/api/cosmo", (_req, res) => {
+    res.json({
+        ...getCosmoSetupStatus(readConfig()),
+        encryptionMethod: cosmoEncryptionMethod() ?? null,
+    });
+});
+router.post("/api/cosmo", (req, res) => {
+    const body = (req.body ?? {});
+    if ((body.backendUrl !== undefined && typeof body.backendUrl !== "string") ||
+        (body.bearerToken !== undefined && typeof body.bearerToken !== "string")) {
+        res.status(400).json({ ok: false, error: "backendUrl and bearerToken must be strings." });
+        return;
+    }
+    const settings = readConfig();
+    try {
+        applyCosmoSave(settings, {
+            backendUrl: body.backendUrl,
+            bearerToken: body.bearerToken,
+            clearToken: body.clearToken === true,
+        });
+    }
+    catch (e) {
+        res.status(400).json({ ok: false, error: e instanceof Error ? e.message : "Invalid COSMO settings." });
+        return;
+    }
+    // writeConfig invalidates the settings cache, so cosmo_* tools use the new values immediately.
+    writeConfig(settings);
+    res.json({ ok: true, configPath: getConfigPath(), ...getCosmoSetupStatus(settings) });
+});
+router.post("/api/cosmo/test", async (req, res) => {
+    const body = (req.body ?? {});
+    const typedToken = typeof body.bearerToken === "string" ? body.bearerToken.trim() : "";
+    let backendUrl;
+    // A typed URL is only honoured together with a typed token, so the saved token is
+    // never sent to a host the user merely typed into the form.
+    if (typedToken && typeof body.backendUrl === "string" && body.backendUrl.trim()) {
+        const v = validateCosmoBackendUrl(body.backendUrl);
+        if (!v.ok) {
+            res.status(400).json({ ok: false, error: v.error });
+            return;
+        }
+        backendUrl = v.url;
+    }
+    try {
+        // POST /Container/Container/filter = GetContainersOfUser, read-only.
+        const r = await cosmoRequest("POST", "/Container/Container/filter", {
+            backendUrl,
+            bearerToken: typedToken || undefined,
+            body: {},
+        });
+        const ok = r.status >= 200 && r.status < 300;
+        res.json({
+            ok,
+            status: r.status,
+            durationMs: r.durationMs,
+            containerCount: ok && Array.isArray(r.body) ? r.body.length : undefined,
+            error: ok
+                ? undefined
+                : r.status === 401 || r.status === 403
+                    ? `COSMO rejected the token (HTTP ${r.status}).`
+                    : `COSMO returned HTTP ${r.status}.`,
+        });
+    }
+    catch (e) {
+        // Messages from getCosmoConfig/fetch never include the token.
+        res.json({ ok: false, error: e instanceof Error ? e.message : "COSMO request failed." });
+    }
+});
 // ── HTML page ────────────────────────────────────────────────────────────────
 router.get("/", (_req, res) => {
     res.type("html").send(SETUP_HTML);
@@ -632,6 +708,23 @@ const SETUP_HTML = `<!DOCTYPE html>
     <div style="margin-top:12px"><button class="btn" onclick="saveBasicAuth()">Save Basic Auth</button></div>
   </div>
   <div id="ba-result"></div>
+</div>
+
+<div class="basic-auth-section" id="cosmo-section">
+  <h3>COSMO (Alpaca API)</h3>
+  <p style="font-size:12px;color:var(--dim);margin-bottom:12px">Used by the <code>cosmo_*</code> tools. The token is stored encrypted and is never shown again. <code>COSMO_BEARER_TOKEN</code> / <code>COSMO_BACKEND_URL</code> environment variables take precedence over saved values.</p>
+  <div id="cosmo-status" class="config-path">Loading…</div>
+  <div class="form-grid" style="max-width:700px">
+    <div class="form-group full"><label>Backend URL</label><input type="text" id="cosmo-url" placeholder="https://cosmo-alpaca-enterprise.westeurope.cloudapp.azure.com/api/alpaca/release"><span class="hint">https, must end in /api/alpaca/release. Leave empty to use the built-in default.</span></div>
+    <div class="form-group full"><label>Bearer Token</label><input type="password" id="cosmo-token" autocomplete="new-password" placeholder="Paste a new token to set or replace it"><span class="hint">Leave empty to keep the current token.</span></div>
+  </div>
+  <div class="form-actions">
+    <button class="btn primary" onclick="saveCosmo()">Save COSMO</button>
+    <button class="btn" onclick="testCosmo()">Test connection</button>
+    <button class="btn danger" id="cosmo-clear" onclick="clearCosmoToken()" style="display:none">Clear token</button>
+    <span id="cosmo-spinner" style="display:none"><span class="spinner"></span></span>
+  </div>
+  <div id="cosmo-result"></div>
 </div>
 
 <script>
@@ -941,7 +1034,66 @@ function closeDcModal() {
   document.getElementById('dc-modal').classList.remove('active');
 }
 
+function cosmoMsg(cls, text) {
+  const el = document.getElementById('cosmo-result');
+  el.innerHTML = '';
+  const d = document.createElement('div');
+  d.className = 'result ' + cls;
+  d.textContent = text;
+  el.appendChild(d);
+}
+
+async function loadCosmo() {
+  const r = await fetch('/dashboard/setup/api/cosmo');
+  const d = await r.json();
+  const labels = { aes: 'AES-256-GCM', dpapi: 'Windows DPAPI', keychain: 'macOS Keychain', 'env-reference': 'environment variable reference', plain: 'PLAIN TEXT', literal: 'PLAIN TEXT' };
+  let t = d.tokenSet ? '•••• token set (' + (labels[d.tokenStorage] || d.tokenStorage) + ')' : 'No token saved';
+  if (d.tokenInsecure) t += ' — not encrypted, paste the token again and save to encrypt it';
+  if (d.envTokenOverride) t += ' | COSMO_BEARER_TOKEN env var is set and takes precedence';
+  if (d.envUrlOverride) t += ' | COSMO_BACKEND_URL env var is set and takes precedence';
+  if (!d.encryptionMethod) t += ' | No encryption available on this host: set MCP_ENCRYPTION_KEY to store a token';
+  const el = document.getElementById('cosmo-status');
+  el.textContent = t;
+  el.style.color = d.tokenInsecure || !d.encryptionMethod ? 'var(--yellow)' : 'var(--dim)';
+  document.getElementById('cosmo-url').value = d.backendUrl || '';
+  document.getElementById('cosmo-clear').style.display = d.tokenSet ? '' : 'none';
+}
+
+async function postCosmo(path, payload) {
+  document.getElementById('cosmo-spinner').style.display = '';
+  try {
+    const r = await fetch('/dashboard/setup/api/cosmo' + path, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
+    return await r.json();
+  } finally {
+    document.getElementById('cosmo-spinner').style.display = 'none';
+  }
+}
+
+async function saveCosmo() {
+  const tokenEl = document.getElementById('cosmo-token');
+  const d = await postCosmo('', { backendUrl: document.getElementById('cosmo-url').value, bearerToken: tokenEl.value });
+  if (!d.ok) { cosmoMsg('err', d.error || 'Save failed'); return; }
+  tokenEl.value = '';
+  cosmoMsg('ok', 'Saved to ' + d.configPath + '. The cosmo_* tools use the new values immediately.');
+  loadCosmo();
+}
+
+async function clearCosmoToken() {
+  if (!confirm('Remove the saved COSMO token?')) return;
+  const d = await postCosmo('', { clearToken: true });
+  if (!d.ok) { cosmoMsg('err', d.error || 'Clear failed'); return; }
+  cosmoMsg('ok', 'Token cleared.');
+  loadCosmo();
+}
+
+async function testCosmo() {
+  const d = await postCosmo('/test', { backendUrl: document.getElementById('cosmo-url').value, bearerToken: document.getElementById('cosmo-token').value });
+  if (d.ok) cosmoMsg('ok', 'Connected (HTTP ' + d.status + ', ' + d.durationMs + ' ms' + (d.containerCount !== undefined ? ', ' + d.containerCount + ' containers' : '') + ').');
+  else cosmoMsg('err', d.error || 'Test failed');
+}
+
 loadConnections();
+loadCosmo();
 </script>
 
 <!-- Auth Code Sign-In Modal -->

@@ -479,7 +479,7 @@ The server includes a web dashboard at `/dashboard`:
 - **Active sessions** — connected MCP clients
 - **Server stats** — uptime, memory, PID, Node version
 - **Debug toggle** — enable/disable `MCP_DEBUG` at runtime without restart
-- **Setup UI** (`/dashboard/setup`) — manage connections, Basic Auth credentials, validate endpoints
+- **Setup UI** (`/dashboard/setup`) — manage connections, Basic Auth credentials, the COSMO backend URL and bearer token, validate endpoints
 - **Restart / Stop** — PM2-aware controls (in Docker containers)
 
 The dashboard is protected by Basic Auth credentials. On first start with no config, it's open to allow initial setup.
@@ -775,6 +775,8 @@ export COSMO_BEARER_TOKEN='…'   # preferred over committing bearerToken
 ```
 
 **How to get a Bearer (VS Code 1.27):** `cosmo-alpaca.debugMode` is **not** in the Settings UI. Add `"cosmo-alpaca.debugMode": true` to **User** `settings.json`, then Command Palette → **Get GitHub API token** or **Get Azure DevOps API token** (token copies to clipboard). Set `COSMO_BEARER_TOKEN` from that value.
+
+**Dashboard setup (`/dashboard/setup` → "COSMO (Alpaca API)"):** enter the backend URL and bearer token instead of editing the file. The token is write-only: it is encrypted before it is written to `local.settings.json` (`aes:` with `MCP_ENCRYPTION_KEY`, otherwise Windows DPAPI or macOS Keychain; a host with none of these refuses to save a token — set `MCP_ENCRYPTION_KEY` or use the env var) and is never returned by the API or shown in the page; the page only says `•••• token set`. Leave the token field empty to keep the current token, or use **Clear token**. The URL must be `https` and end in `/api/alpaca/release`. **Test connection** makes one read-only call (list containers) with the typed token, or with the saved one if the field is empty. Saving takes effect immediately for `cosmo_*` (no restart). `COSMO_BEARER_TOKEN` / `COSMO_BACKEND_URL` env vars still take precedence over saved values, and the page says when they do. In Docker, `MCP_ENCRYPTION_KEY` must be set on the container for the token to be stored.
 
 **Verify without echoing the secret:** `cosmo_whoami_config` returns resolved `backendUrl`, whether a bearer is configured (+ length), and `defaultBackendUrl` / `defaultPublicHost` — never the token value.
 
