@@ -556,6 +556,9 @@ export function registerDevServicesTools(server) {
             "Cosmo has no /Container/Exec/{id} test-runner endpoint (only deployApp/appinfo/restartServerInstance/…). " +
             "mode=helper is local-docker only (containerName). Reuses stdio/devConnection NavUserPassword auth. " +
             "Returns structured passed/failed/skipped + failure messages (not megabyte dumps). " +
+            "On the Client Services page 130455 path, a numeric testCodeunit is applied as " +
+            "TestCodeunitRange (id..id) so that codeunit is loaded and run; a name or wildcard " +
+            "stays a TestCodeunit filter. Optional testCodeunitRange overrides the range. " +
             "Cosmo lifecycle tools stay separate (cosmo_*).",
         inputSchema: {
             extensionId: z
@@ -565,7 +568,11 @@ export function registerDevServicesTools(server) {
             testCodeunit: z
                 .string()
                 .optional()
-                .describe("Optional test codeunit id or name filter."),
+                .describe("Optional test codeunit id or name filter. A numeric id (e.g. 99012) is applied as TestCodeunitRange id..id on page 130455 so the codeunit is loaded. Name or wildcard filters are passed as TestCodeunit."),
+            testCodeunitRange: z
+                .string()
+                .optional()
+                .describe("Optional BC filter for page 130455 Test Codeunit Range (e.g. 99012..99012 or 99000..99100). When omitted, a numeric testCodeunit is used as id..id. Ignored on legacy test pages."),
             testFunction: z.string().optional().describe("Optional test function name filter."),
             testSuite: z.string().optional().describe("Test suite name (default DEFAULT)."),
             companyName: z
