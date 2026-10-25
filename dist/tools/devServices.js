@@ -566,6 +566,11 @@ export function registerDevServicesTools(server) {
                 .string()
                 .optional()
                 .describe("Optional test codeunit id or name filter."),
+            testCodeunitRange: z
+                .string()
+                .optional()
+                .describe("Optional TestCodeunitRange for page 130455 (e.g. 50100..50199). " +
+                "Wins over a numeric testCodeunit mapped to id..id."),
             testFunction: z.string().optional().describe("Optional test function name filter."),
             testSuite: z.string().optional().describe("Test suite name (default DEFAULT)."),
             companyName: z

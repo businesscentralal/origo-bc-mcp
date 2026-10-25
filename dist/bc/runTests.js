@@ -53,6 +53,28 @@ function truncate(s, max = 8000) {
 function escPs(s) {
     return s.replace(/'/g, "''");
 }
+/**
+ * Page 130455 (Command Line Test Tool) loads codeunits in
+ * TestCodeunitRangeFilter.OnValidate → SelectTestMethodsByRange.
+ * TestCodeunit does not populate the suite. A numeric id (with ExtensionId set)
+ * also fails the RunNextTest guard (`TestCodeunit` must be `*`) and the repeater
+ * quick-filter matches nothing, so Run-Tests saves an empty `<testsuites/>`
+ * after logging `Setting test codeunit range ''`.
+ *
+ * A numeric testCodeunit is therefore applied as `id..id` on page 130455 and is
+ * not also passed as TestCodeunit. Name/wildcard filters still use TestCodeunit.
+ * An explicit testCodeunitRange wins. Other test pages keep the original id.
+ */
+export function clientServicesCodeunitFilter(input) {
+    const testCodeunit = String(input?.testCodeunit ?? "").trim();
+    const explicitRange = String(input?.testCodeunitRange ?? "").trim();
+    const numericId = /^\d+$/.test(testCodeunit) ? testCodeunit : "";
+    const testCodeunitRange = explicitRange || (numericId ? `${numericId}..${numericId}` : "");
+    // Numeric ids are carried by the range filter. Passing them as TestCodeunit
+    // skips RunNextTest and the repeater path returns no rows.
+    const testCodeunitOn130455 = numericId ? "" : testCodeunit;
+    return { testCodeunit, testCodeunitRange, testCodeunitOn130455 };
+}
 function resolveSshUser(input) {
     return (input.sshUser?.trim() ||
         process.env.COSMO_SSH_USER?.trim() ||
@@ -225,6 +247,7 @@ export function buildRemoteTestScript(input, conn, opts) {
     const pass = conn.key || "";
     const remotePs = opts?.remotePsTestFunctions || "";
     const remoteCc = opts?.remoteClientContext || "";
+    const codeunitFilter = clientServicesCodeunitFilter(input);
     const lines = [
         "$ErrorActionPreference = 'Continue'",
         "Write-Host '[MCP] bc_dev_run_tests remote start'",
@@ -233,7 +256,9 @@ export function buildRemoteTestScript(input, conn, opts) {
         `$tenant = '${escPs(tenant)}'`,
         `$testSuite = '${escPs(suite)}'`,
         `$extensionId = '${escPs(input.extensionId || "")}'`,
-        `$testCodeunit = '${escPs(input.testCodeunit || "")}'`,
+        `$testCodeunit = '${escPs(codeunitFilter.testCodeunit)}'`,
+        `$testCodeunitRange = '${escPs(codeunitFilter.testCodeunitRange)}'`,
+        `$testCodeunitOn130455 = '${escPs(codeunitFilter.testCodeunitOn130455)}'`,
         `$testFunction = '${escPs(input.testFunction || "")}'`,
         `$user = '${escPs(user)}'`,
         `$passPlain = '${escPs(pass)}'`,
@@ -414,7 +439,15 @@ export function buildRemoteTestScript(input, conn, opts) {
         `            JUnitResultFileName = $junit`,
         `          }`,
         `          if ($extensionId) { $rtParams.ExtensionId = $extensionId }`,
-        `          if ($testCodeunit) { $rtParams.TestCodeunit = $testCodeunit }`,
+        `          if ($testPage -eq 130455) {`,
+        `            # Range filter loads the codeunit. A numeric TestCodeunit skips RunNextTest`,
+        `            # and the repeater quick-filter returns an empty suite.`,
+        `            if ($testCodeunitRange) { $rtParams.TestCodeunitRange = $testCodeunitRange }`,
+        `            if ($testCodeunitOn130455) { $rtParams.TestCodeunit = $testCodeunitOn130455 }`,
+        `            Write-Host "[MCP] Page 130455 filters TestCodeunitRange='$testCodeunitRange' TestCodeunit='$testCodeunitOn130455'"`,
+        `          } elseif ($testCodeunit) {`,
+        `            $rtParams.TestCodeunit = $testCodeunit`,
+        `          }`,
         `          if ($testFunction) { $rtParams.TestFunction = $testFunction }`,
         `          $allPassed = Run-Tests @rtParams`,
         `          $clientServicesOk = $true`,
