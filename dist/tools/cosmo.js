@@ -6,6 +6,7 @@ import { z } from "zod";
 import { json } from "../bc/runtime.js";
 import { cosmoRequest, cosmoErrorHint, deriveBcEndpoints, getCosmoConfig, redactCosmoSecrets, redactCosmoText, } from "../cosmo/client.js";
 import { ensureCosmoSsh } from "../cosmo/ssh.js";
+import { premiumAfterCreate } from "../bc/premiumPlan.js";
 const backendUrlField = z
     .string()
     .optional()
@@ -37,6 +38,10 @@ function resultPayload(res, extra) {
                 : {}),
         ...extra,
     };
+}
+function envSeconds(name, fallback) {
+    const v = Number(process.env[name]);
+    return Number.isFinite(v) && v >= 0 ? v : fallback;
 }
 function stripUndefined(obj) {
     const out = {};
@@ -98,9 +103,13 @@ export function registerCosmoTools(server) {
             "kind=github → POST /Container/Container/gitHub (CreateGitHubBcContainer); " +
             "kind=azureDevOps → POST /Container/Container/azureDevOps; " +
             "kind=standalone → POST /Container/Container/standalone. " +
-            "Premium experience: enablePremium=true assigns the premium SKU (User Experience) to the default admin " +
-            "user on kind=generic. kind=github/azureDevOps take it from the repo config instead (AL-Go setting " +
-            "assignPremiumPlan / cosmo.json enablePremium). " +
+            "Premium experience: enablePremium alone does NOT give a Premium experience on Cosmo dev containers - the " +
+            "user stays on Essential and Company Information → Experience = Premium fails with 'you do not have a Premium " +
+            "license'. Use assignPremiumPlan=true (kind=generic): sends enablePremium, waits until the container is Running " +
+            "(waitTimeoutSeconds, default 1200), then assigns the Premium User Plan inside BC over SSH (as BcContainerHelper " +
+            "-assignPremiumPlan) and returns the result under premiumPlan; if the wait runs out it returns the container id " +
+            "and a hint to call bc_dev_assign_premium_plan once Running. kind=github/azureDevOps take it from the repo config " +
+            "(AL-Go setting assignPremiumPlan / cosmo.json enablePremium); bc_dev_assign_premium_plan works on any container. " +
             "After create, derive …/{id}dev + …/{id}rest and call bc_dev_publish_*.",
         inputSchema: {
             kind: z
@@ -119,7 +128,21 @@ export function registerCosmoTools(server) {
                 .boolean()
                 .optional()
                 .describe("Premium experience for the default admin user (Cosmo BcContainerRequest.enablePremium). " +
-                "kind=generic only; for kind=github/azureDevOps set assignPremiumPlan (AL-Go) or enablePremium (cosmo.json) in the repo."),
+                "kind=generic only; for kind=github/azureDevOps set assignPremiumPlan (AL-Go) or enablePremium (cosmo.json) in the repo. " +
+                "On its own it does not unlock the Premium experience - use assignPremiumPlan."),
+            assignPremiumPlan: z
+                .boolean()
+                .optional()
+                .describe("kind=generic only. Sends enablePremium + sshEnabled, waits for Running, then assigns the BC Premium plan to " +
+                "every enabled Full User (bc_dev_assign_premium_plan) and returns that result."),
+            waitTimeoutSeconds: z
+                .number()
+                .int()
+                .min(0)
+                .max(3600)
+                .optional()
+                .describe("assignPremiumPlan: how long to wait for Running before returning a hint instead (default " +
+                "COSMO_PREMIUM_WAIT_S or 1200; keep it under your MCP client's tool-call timeout)."),
             /** Extra fields for GitHub/ADO create bodies (org, repo, project, branch, …). */
             source: z
                 .record(z.unknown())
@@ -127,10 +150,21 @@ export function registerCosmoTools(server) {
                 .describe("Additional create payload fields (e.g. organization, project, repository, branch)."),
             backendUrl: backendUrlField,
         },
-    }, async ({ kind, displayName, username, password, owner, state, sshEnabled, type, bcArtifact, enablePremium, source, backendUrl }) => {
-        if (enablePremium !== undefined && kind !== "generic") {
-            throw new Error("enablePremium applies to kind=generic only. For kind=github set \"assignPremiumPlan\": true in the repo's " +
-                ".AL-Go/settings.json; for kind=azureDevOps set \"enablePremium\": true in cosmo.json.");
+    }, async ({ kind, displayName, username, password, owner, state, sshEnabled, type, bcArtifact, enablePremium, assignPremiumPlan, waitTimeoutSeconds, source, backendUrl, }) => {
+        if ((enablePremium !== undefined || assignPremiumPlan) && kind !== "generic") {
+            throw new Error("enablePremium/assignPremiumPlan apply to kind=generic only. For kind=github set \"assignPremiumPlan\": true in the repo's " +
+                ".AL-Go/settings.json; for kind=azureDevOps set \"enablePremium\": true in cosmo.json " +
+                "(or call bc_dev_assign_premium_plan once the container is Running).");
+        }
+        if (assignPremiumPlan) {
+            if (enablePremium === false)
+                throw new Error("assignPremiumPlan=true conflicts with enablePremium=false.");
+            if (sshEnabled === false)
+                throw new Error("assignPremiumPlan=true needs SSH; do not set sshEnabled=false.");
+            if (state === "Stop")
+                throw new Error("assignPremiumPlan=true needs a started container; do not set state=Stop.");
+            enablePremium = true;
+            sshEnabled = true;
         }
         const body = stripUndefined({
             displayName,
@@ -155,7 +189,22 @@ export function registerCosmoTools(server) {
         const id = res.body?.id ||
             res.body?.containerId;
         const endpoints = id ? deriveBcEndpoints(String(id)) : undefined;
-        return json(resultPayload(res, { derivedEndpoints: endpoints }));
+        if (!assignPremiumPlan)
+            return json(resultPayload(res, { derivedEndpoints: endpoints }));
+        const created = res.status >= 200 && res.status < 300;
+        const premiumPlan = created && id
+            ? await premiumAfterCreate(String(id), {
+                waitTimeoutSeconds: waitTimeoutSeconds ?? envSeconds("COSMO_PREMIUM_WAIT_S", 1200),
+                pollSeconds: envSeconds("COSMO_PREMIUM_POLL_S", 15),
+                backendUrl,
+            })
+            : {
+                assigned: false,
+                hint: created
+                    ? "Create returned no container id; call bc_dev_assign_premium_plan with the id once it is Running."
+                    : "Create failed; no Premium plan assigned.",
+            };
+        return json(resultPayload(res, { derivedEndpoints: endpoints, premiumPlan }));
     });
     // ── cosmo_update_container ────────────────────────────────────────────────
     server.registerTool("cosmo_update_container", {

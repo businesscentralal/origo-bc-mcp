@@ -17,6 +17,7 @@ import { runBcTests } from "../bc/runTests.js";
 import { runContainerScript } from "../bc/containerScript.js";
 import { automationInstaller, buildCleanAppDataScript, buildInstallScript, buildUninstallScript, installViaAutomation, isGuid, listAllExtensions, reinstallDependents, sshInstaller, } from "../bc/appLifecycle.js";
 import { buildRuntimePackage } from "../bc/runtimePackage.js";
+import { assignPremiumPlan } from "../bc/premiumPlan.js";
 const schemaUpdateModeEnum = z
     .enum(["Synchronize", "Recreate", "ForceSync", "synchronize", "recreate", "forcesync"])
     .optional()
@@ -705,6 +706,39 @@ export function registerDevServicesTools(server) {
             throw new Error("appId must be a GUID.");
         const script = buildCleanAppDataScript({ appId, version: versionText, tenant });
         return json(await runContainerScript(containerId.trim(), script, { label: "clean", ...sshArgs }));
+    });
+    // ── bc_dev_assign_premium_plan ───────────────────────────────────────────
+    server.registerTool("bc_dev_assign_premium_plan", {
+        title: "Assign the BC Premium plan to container users (Cosmo SSH)",
+        description: "Gives users of a Cosmo BC container the Dynamics 365 Business Central Premium plan, so Company Information → " +
+            "Experience = Premium works (a container has no Office 365, and Cosmo enablePremium alone leaves the user on " +
+            "Essential: 'You cannot upgrade to the Premium experience because you do not have a Premium license'). " +
+            "Same as BcContainerHelper -assignPremiumPlan: inserts a User Plan row (Plan ID 8e9002c0-a1d8-4465-b952-817d2948e6e2) " +
+            "for each user's User Security ID in the tenant database with Invoke-Sqlcmd inside the container; idempotent " +
+            "(skips users that already have it); the Essential row is left in place. Default users: every Enabled Full User " +
+            "of the tenant. Returns per-user plans before/after. Afterwards sign in again and set Experience = Premium on " +
+            "Company Information (the company Experience is not changed by this tool).",
+        inputSchema: {
+            containerId: z.string().describe("Cosmo container id."),
+            userName: z
+                .string()
+                .optional()
+                .describe("One BC user name (default: every Enabled user with a Full User licence type)."),
+            tenant: z.string().optional().describe("Tenant id (default 'default')."),
+            dryRun: z.boolean().optional().describe("Report current plans and what would be inserted, write nothing."),
+            waitForServerSeconds: z
+                .number()
+                .int()
+                .min(0)
+                .max(1800)
+                .optional()
+                .describe("Wait up to this long for the server instance to list users (default 60)."),
+            ...sshCommonSchema,
+        },
+    }, async ({ containerId, userName, tenant, dryRun, waitForServerSeconds, ...sshArgs }) => {
+        if (!containerId?.trim())
+            throw new Error("containerId is required.");
+        return json(await assignPremiumPlan(containerId.trim(), { userName, tenant, dryRun, waitForServerSeconds, ...sshArgs }));
     });
     // ── bc_dev_run_tests ──────────────────────────────────────────────────────
     server.registerTool("bc_dev_run_tests", {
