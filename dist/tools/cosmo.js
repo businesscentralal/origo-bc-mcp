@@ -98,6 +98,9 @@ export function registerCosmoTools(server) {
             "kind=github → POST /Container/Container/gitHub (CreateGitHubBcContainer); " +
             "kind=azureDevOps → POST /Container/Container/azureDevOps; " +
             "kind=standalone → POST /Container/Container/standalone. " +
+            "Premium experience: enablePremium=true assigns the premium SKU (User Experience) to the default admin " +
+            "user on kind=generic. kind=github/azureDevOps take it from the repo config instead (AL-Go setting " +
+            "assignPremiumPlan / cosmo.json enablePremium). " +
             "After create, derive …/{id}dev + …/{id}rest and call bc_dev_publish_*.",
         inputSchema: {
             kind: z
@@ -112,6 +115,11 @@ export function registerCosmoTools(server) {
             sshEnabled: z.boolean().optional(),
             type: z.enum(["Dev", "Build", "Standalone"]).optional(),
             bcArtifact: bcArtifactSchema,
+            enablePremium: z
+                .boolean()
+                .optional()
+                .describe("Premium experience for the default admin user (Cosmo BcContainerRequest.enablePremium). " +
+                "kind=generic only; for kind=github/azureDevOps set assignPremiumPlan (AL-Go) or enablePremium (cosmo.json) in the repo."),
             /** Extra fields for GitHub/ADO create bodies (org, repo, project, branch, …). */
             source: z
                 .record(z.unknown())
@@ -119,7 +127,11 @@ export function registerCosmoTools(server) {
                 .describe("Additional create payload fields (e.g. organization, project, repository, branch)."),
             backendUrl: backendUrlField,
         },
-    }, async ({ kind, displayName, username, password, owner, state, sshEnabled, type, bcArtifact, source, backendUrl }) => {
+    }, async ({ kind, displayName, username, password, owner, state, sshEnabled, type, bcArtifact, enablePremium, source, backendUrl }) => {
+        if (enablePremium !== undefined && kind !== "generic") {
+            throw new Error("enablePremium applies to kind=generic only. For kind=github set \"assignPremiumPlan\": true in the repo's " +
+                ".AL-Go/settings.json; for kind=azureDevOps set \"enablePremium\": true in cosmo.json.");
+        }
         const body = stripUndefined({
             displayName,
             username,
@@ -129,6 +141,7 @@ export function registerCosmoTools(server) {
             sshEnabled,
             type,
             bcArtifact,
+            enablePremium,
             ...(source ?? {}),
         });
         const path = kind === "github"
