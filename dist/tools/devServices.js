@@ -14,6 +14,8 @@ import { getAuthContext } from "../auth/context.js";
 import { resolveTarget, json } from "../bc/runtime.js";
 import { resolveDeveloperBaseUrl, bcDevRequest, findExtensions, automationBoundAction, automationAuthError, defaultSymbolsDir, defaultArtifactDir, downloadToFile, extractAppsFromZip, schemaUpdateModeQuery, tenantQuery, buildAppMultipart, readAppBytes, } from "../bc/developer.js";
 import { runBcTests } from "../bc/runTests.js";
+import { runContainerScript } from "../bc/containerScript.js";
+import { automationInstaller, buildCleanAppDataScript, buildInstallScript, buildUninstallScript, installViaAutomation, isGuid, listAllExtensions, reinstallDependents, sshInstaller, } from "../bc/appLifecycle.js";
 import { buildRuntimePackage } from "../bc/runtimePackage.js";
 const schemaUpdateModeEnum = z
     .enum(["Synchronize", "Recreate", "ForceSync", "synchronize", "recreate", "forcesync"])
@@ -29,6 +31,58 @@ function normalizeSchemaMode(mode) {
         return "ForceSync";
     return "Synchronize";
 }
+const reinstallSchema = {
+    reinstallDependents: z
+        .boolean()
+        .optional()
+        .describe("List installed extensions before the publish (Automation API) and afterwards reinstall every app the " +
+        "publish left uninstalled, in dependency order (retry passes). Returns a before/after summary."),
+    reinstallVia: z
+        .enum(["automation", "ssh"])
+        .optional()
+        .describe("How to reinstall: Automation API Microsoft.NAV.install (default) or Cosmo SSH Install-NAVApp (needs containerId)."),
+    containerId: z.string().optional().describe("Cosmo container id — needed for reinstallVia=ssh."),
+    companyId: z.string().optional().describe("Company for the Automation API extension list (default: session selection)."),
+};
+/**
+ * Wraps a publish: snapshot installed extensions, publish, then reinstall what the publish
+ * uninstalled. Without reinstallDependents it only publishes.
+ */
+async function publishWithReinstall(args, publish, publishedSomething) {
+    if (!args.reinstallDependents)
+        return publish();
+    if (args.reinstallVia === "ssh" && !args.containerId?.trim()) {
+        throw new Error("reinstallVia=ssh needs containerId.");
+    }
+    const t = await resolveTarget({ companyId: args.companyId });
+    let before;
+    try {
+        before = await listAllExtensions(t);
+    }
+    catch (err) {
+        throw new Error("reinstallDependents needs the Automation API extension list before publishing, and it failed " +
+            `(nothing was published): ${err instanceof Error ? err.message : String(err)}`);
+    }
+    const result = await publish();
+    if (!publishedSomething(result))
+        return result;
+    const installer = args.reinstallVia === "ssh"
+        ? sshInstaller(args.containerId.trim(), { tenant: args.tenant })
+        : automationInstaller(t);
+    try {
+        const reinstall = await reinstallDependents(before, () => listAllExtensions(t), installer);
+        return { ...result, reinstall };
+    }
+    catch (err) {
+        return { ...result, reinstall: { error: err instanceof Error ? err.message : String(err) } };
+    }
+}
+const sshCommonSchema = {
+    sshUser: z.string().optional().describe("SSH username (default sshuser / COSMO_SSH_USER)."),
+    timeoutMs: z.number().int().positive().optional().describe("Remote script timeout (default 600000)."),
+    sshWaitSeconds: z.number().optional().describe("How long to wait for SSH after enabling it (default 300)."),
+    allowRestart: z.boolean().optional().describe("Let the SSH check Stop → Start the container as a last resort (default false)."),
+};
 async function publishAppFile(appPath, opts) {
     const ctx = getAuthContext();
     const { bytes, fileName } = readAppBytes(appPath);
@@ -149,6 +203,75 @@ async function resolveArtifactDownload(input) {
     }
     throw new Error("Provide url, azureDevOps, or github artifact source.");
 }
+/** Download each artifact and publish its apps in order; stops at the first failed publish. */
+async function publishArtifacts(artifacts, tenant, schemaUpdateMode, outputDir) {
+    const dir = outputDir ?? join(defaultArtifactDir(), randomUUID());
+    mkdirSync(dir, { recursive: true });
+    const published = [];
+    const mode = normalizeSchemaMode(schemaUpdateMode);
+    for (let i = 0; i < artifacts.length; i++) {
+        const art = artifacts[i];
+        const resolved = await resolveArtifactDownload(art);
+        const dest = join(dir, `${i}-${resolved.suggestedName}`);
+        const dl = await downloadToFile(resolved.downloadUrl, dest, resolved.headers);
+        let appPaths = [];
+        if (dl.path.toLowerCase().endsWith(".app")) {
+            appPaths = [dl.path];
+        }
+        else if (dl.path.toLowerCase().endsWith(".zip") ||
+            (dl.contentType ?? "").includes("zip")) {
+            const extractDir = join(dir, `extract-${i}`);
+            const found = await extractAppsFromZip(dl.path, extractDir);
+            if (art.appFileNames?.length) {
+                appPaths = art.appFileNames.map((name) => {
+                    const match = found.find((p) => basename(p).toLowerCase() === name.toLowerCase());
+                    if (!match) {
+                        throw new Error(`appFileName '${name}' not found in zip. Found: ${found.map((p) => basename(p)).join(", ")}`);
+                    }
+                    return match;
+                });
+            }
+            else {
+                // Stable order by basename
+                appPaths = found.sort((a, b) => basename(a).localeCompare(basename(b)));
+            }
+        }
+        else if (existsSync(dl.path) && readFileSync(dl.path).subarray(0, 2).toString() === "PK") {
+            const extractDir = join(dir, `extract-${i}`);
+            const found = await extractAppsFromZip(dl.path, extractDir);
+            appPaths = art.appFileNames?.length
+                ? art.appFileNames.map((name) => {
+                    const match = found.find((p) => basename(p).toLowerCase() === name.toLowerCase());
+                    if (!match)
+                        throw new Error(`appFileName '${name}' not in zip`);
+                    return match;
+                })
+                : found.sort((a, b) => basename(a).localeCompare(basename(b)));
+        }
+        else {
+            // Assume raw .app even without extension
+            appPaths = [dl.path];
+        }
+        for (const appPath of appPaths) {
+            const result = await publishAppFile(appPath, { tenant, schemaUpdateMode: mode });
+            published.push({ sourceIndex: i, appPath, ...result });
+            if (!result.ok) {
+                return {
+                    stopped: true,
+                    reason: `Publish failed for ${basename(appPath)} HTTP ${result.statusCode}`,
+                    published,
+                    outputDir: dir,
+                };
+            }
+        }
+    }
+    return {
+        ok: true,
+        publishedCount: published.length,
+        published,
+        outputDir: dir,
+    };
+}
 export function registerDevServicesTools(server) {
     // ── bc_dev_get_metadata ───────────────────────────────────────────────────
     server.registerTool("bc_dev_get_metadata", {
@@ -230,15 +353,17 @@ export function registerDevServicesTools(server) {
         title: "Publish .app via Developer Services",
         description: "POST multipart to {developerBase}/dev/apps?tenant&SchemaUpdateMode=… — the VS Code / Alpaca " +
             "dev publish path (verified HTTP 200 on Cosmo Alpaca). Accepts appPath on disk or appBase64+fileName. " +
-            "Does not use Cosmo ExecDeployApp (feeds only); this is the multipart DEV endpoint.",
+            "Does not use Cosmo ExecDeployApp (feeds only); this is the multipart DEV endpoint. " +
+            "A dev publish of a base app uninstalls its dependents — pass reinstallDependents=true to reinstall them afterwards.",
         inputSchema: {
             appPath: z.string().optional().describe("Path to a .app file on disk."),
             appBase64: z.string().optional().describe("Base64-encoded .app (prefer appPath for large files)."),
             fileName: z.string().optional().describe("File name when using appBase64 (default app.app)."),
             tenant: z.string().optional(),
             schemaUpdateMode: schemaUpdateModeEnum,
+            ...reinstallSchema,
         },
-    }, async ({ appPath, appBase64, fileName, tenant, schemaUpdateMode }) => {
+    }, async ({ appPath, appBase64, fileName, tenant, schemaUpdateMode, ...reinstallArgs }) => {
         if (!appPath && !appBase64) {
             throw new Error("Provide appPath or appBase64.");
         }
@@ -249,10 +374,10 @@ export function registerDevServicesTools(server) {
             pathToPublish = join(dir, fileName ?? "app.app");
             writeFileSync(pathToPublish, Buffer.from(appBase64, "base64"));
         }
-        const result = await publishAppFile(pathToPublish, {
+        const result = await publishWithReinstall({ ...reinstallArgs, tenant }, () => publishAppFile(pathToPublish, {
             tenant,
             schemaUpdateMode: normalizeSchemaMode(schemaUpdateMode),
-        });
+        }), (r) => r.ok === true);
         return json(result);
     });
     // ── bc_dev_build_runtime_package ──────────────────────────────────────────
@@ -341,74 +466,11 @@ export function registerDevServicesTools(server) {
             tenant: z.string().optional(),
             schemaUpdateMode: schemaUpdateModeEnum,
             outputDir: z.string().optional(),
+            ...reinstallSchema,
         },
-    }, async ({ artifacts, tenant, schemaUpdateMode, outputDir }) => {
-        const dir = outputDir ?? join(defaultArtifactDir(), randomUUID());
-        mkdirSync(dir, { recursive: true });
-        const published = [];
-        const mode = normalizeSchemaMode(schemaUpdateMode);
-        for (let i = 0; i < artifacts.length; i++) {
-            const art = artifacts[i];
-            const resolved = await resolveArtifactDownload(art);
-            const dest = join(dir, `${i}-${resolved.suggestedName}`);
-            const dl = await downloadToFile(resolved.downloadUrl, dest, resolved.headers);
-            let appPaths = [];
-            if (dl.path.toLowerCase().endsWith(".app")) {
-                appPaths = [dl.path];
-            }
-            else if (dl.path.toLowerCase().endsWith(".zip") ||
-                (dl.contentType ?? "").includes("zip")) {
-                const extractDir = join(dir, `extract-${i}`);
-                const found = await extractAppsFromZip(dl.path, extractDir);
-                if (art.appFileNames?.length) {
-                    appPaths = art.appFileNames.map((name) => {
-                        const match = found.find((p) => basename(p).toLowerCase() === name.toLowerCase());
-                        if (!match) {
-                            throw new Error(`appFileName '${name}' not found in zip. Found: ${found.map((p) => basename(p)).join(", ")}`);
-                        }
-                        return match;
-                    });
-                }
-                else {
-                    // Stable order by basename
-                    appPaths = found.sort((a, b) => basename(a).localeCompare(basename(b)));
-                }
-            }
-            else if (existsSync(dl.path) && readFileSync(dl.path).subarray(0, 2).toString() === "PK") {
-                const extractDir = join(dir, `extract-${i}`);
-                const found = await extractAppsFromZip(dl.path, extractDir);
-                appPaths = art.appFileNames?.length
-                    ? art.appFileNames.map((name) => {
-                        const match = found.find((p) => basename(p).toLowerCase() === name.toLowerCase());
-                        if (!match)
-                            throw new Error(`appFileName '${name}' not in zip`);
-                        return match;
-                    })
-                    : found.sort((a, b) => basename(a).localeCompare(basename(b)));
-            }
-            else {
-                // Assume raw .app even without extension
-                appPaths = [dl.path];
-            }
-            for (const appPath of appPaths) {
-                const result = await publishAppFile(appPath, { tenant, schemaUpdateMode: mode });
-                published.push({ sourceIndex: i, appPath, ...result });
-                if (!result.ok) {
-                    return json({
-                        stopped: true,
-                        reason: `Publish failed for ${basename(appPath)} HTTP ${result.statusCode}`,
-                        published,
-                        outputDir: dir,
-                    });
-                }
-            }
-        }
-        return json({
-            ok: true,
-            publishedCount: published.length,
-            published,
-            outputDir: dir,
-        });
+    }, async ({ artifacts, tenant, schemaUpdateMode, outputDir, ...reinstallArgs }) => {
+        const result = await publishWithReinstall({ ...reinstallArgs, tenant }, () => publishArtifacts(artifacts, tenant, schemaUpdateMode, outputDir), (r) => Array.isArray(r.published) && r.published.some((p) => p.ok === true));
+        return json(result);
     });
     // ── bc_dev_uninstall_app ──────────────────────────────────────────────────
     server.registerTool("bc_dev_uninstall_app", {
@@ -426,10 +488,27 @@ export function registerDevServicesTools(server) {
             deleteExtensionData: z
                 .boolean()
                 .optional()
-                .describe("If true, call uninstallAndDeleteExtensionData instead."),
+                .describe("If true, call uninstallAndDeleteExtensionData instead (via=ssh: Uninstall-NAVApp -DoNotSaveData)."),
             companyId: z.string().optional(),
+            via: z
+                .enum(["automation", "ssh"])
+                .optional()
+                .describe("automation (default): Automation API bound action. ssh: Uninstall-NAVApp inside the Cosmo container (needs containerId)."),
+            containerId: z.string().optional().describe("Cosmo container id (via=ssh)."),
+            clearSchema: z
+                .boolean()
+                .optional()
+                .describe("via=ssh: also pass -ClearSchema (when the cmdlet supports it), which drops the app's tables. Implies deleteExtensionData."),
+            tenant: z.string().optional().describe("via=ssh: tenant (default 'default')."),
+            ...sshCommonSchema,
         },
-    }, async ({ publisher, name, versionText, appId, packageId, deleteExtensionData, companyId }) => {
+    }, async ({ publisher, name, versionText, appId, packageId, deleteExtensionData, companyId, via, containerId, clearSchema, tenant, ...sshArgs }) => {
+        if (via === "ssh") {
+            if (!containerId?.trim())
+                throw new Error("via=ssh needs containerId.");
+            const script = buildUninstallScript({ appId: appId ?? packageId, name, publisher, version: versionText, tenant }, { doNotSaveData: Boolean(deleteExtensionData || clearSchema), clearSchema: Boolean(clearSchema) });
+            return json(await runContainerScript(containerId.trim(), script, { label: "uninstall", ...sshArgs }));
+        }
         const t = await resolveTarget({ companyId });
         let pkg = packageId;
         let matched = [];
@@ -544,6 +623,89 @@ export function registerDevServicesTools(server) {
                 : {}),
         });
     });
+    // ── bc_dev_install_app ────────────────────────────────────────────────────
+    server.registerTool("bc_dev_install_app", {
+        title: "Install a published app (Cosmo SSH or Automation API)",
+        description: "Installs a published but uninstalled extension, e.g. the dependents a Foundation dev publish left uninstalled. " +
+            "via=ssh (default when containerId is given): Sync-NAVApp + Install-NAVApp inside the Cosmo container; when another " +
+            "version is installed or the tenant holds older data it runs Start-NAVAppDataUpgrade instead. " +
+            "via=automation: Automation API extensions(<packageId>)/Microsoft.NAV.install. " +
+            "Default version: the highest published one. Returns before/after app state.",
+        inputSchema: {
+            appId: z.string().optional().describe("App id GUID (preferred)."),
+            name: z.string().optional().describe("Extension name, when appId is not known."),
+            publisher: z.string().optional(),
+            versionText: z.string().optional().describe("Exact version, e.g. 28.0.11.659 (default: highest published)."),
+            tenant: z.string().optional().describe("Tenant (default 'default')."),
+            via: z.enum(["automation", "ssh"]).optional(),
+            containerId: z.string().optional().describe("Cosmo container id (via=ssh)."),
+            syncMode: z
+                .enum(["Add", "Development", "ForceSync"])
+                .optional()
+                .describe("via=ssh: Sync-NAVApp -Mode before installing (default Add)."),
+            companyId: z.string().optional(),
+            ...sshCommonSchema,
+        },
+    }, async ({ appId, name, publisher, versionText, tenant, via, containerId, syncMode, companyId, ...sshArgs }) => {
+        const mode = via ?? (containerId?.trim() ? "ssh" : "automation");
+        if (mode === "ssh") {
+            if (!containerId?.trim())
+                throw new Error("via=ssh needs containerId.");
+            const script = buildInstallScript({ appId, name, publisher, version: versionText, tenant }, { install: true, syncMode });
+            return json(await runContainerScript(containerId.trim(), script, { label: "install", ...sshArgs }));
+        }
+        const t = await resolveTarget({ companyId });
+        return json(await installViaAutomation(t, { appId, name, publisher, versionText }));
+    });
+    // ── bc_dev_sync_app ───────────────────────────────────────────────────────
+    server.registerTool("bc_dev_sync_app", {
+        title: "Sync-NAVApp a published app (Cosmo SSH)",
+        description: "Runs Sync-NAVApp for one published app version inside the Cosmo container (no install). " +
+            "Modes: Add (default), Development, ForceSync, Clean. Clean drops the app's tables and data and needs confirm=true. " +
+            "Returns before/after app state.",
+        inputSchema: {
+            containerId: z.string().describe("Cosmo container id."),
+            appId: z.string().optional(),
+            name: z.string().optional(),
+            publisher: z.string().optional(),
+            versionText: z.string().optional().describe("Default: highest published version."),
+            tenant: z.string().optional(),
+            mode: z.enum(["Add", "Development", "ForceSync", "Clean"]).optional(),
+            confirm: z.boolean().optional().describe("Required (true) for mode=Clean."),
+            ...sshCommonSchema,
+        },
+    }, async ({ containerId, appId, name, publisher, versionText, tenant, mode, confirm, ...sshArgs }) => {
+        if (mode === "Clean" && confirm !== true) {
+            throw new Error("mode=Clean deletes the app's tables and data on the tenant; pass confirm=true to proceed.");
+        }
+        const script = buildInstallScript({ appId, name, publisher, version: versionText, tenant }, { install: false, syncMode: mode });
+        return json(await runContainerScript(containerId.trim(), script, { label: "sync", ...sshArgs }));
+    });
+    // ── bc_dev_clean_app_data ─────────────────────────────────────────────────
+    server.registerTool("bc_dev_clean_app_data", {
+        title: "Delete an app's data and schema on a tenant (Cosmo SSH)",
+        description: "DESTRUCTIVE. Removes every trace of one app id's data on the tenant so an older version can install " +
+            "(fixes 'a newer version ... was already installed' after that newer version was unpublished): uninstalls " +
+            "installed versions with -DoNotSaveData (+ -ClearSchema when available), then Sync-NAVApp -Mode Clean " +
+            "against a published version (versionText, else the highest). Needs one version of the app published: " +
+            "publish the one you want first, then clean, then bc_dev_install_app. Requires appId (GUID) and confirm=true. " +
+            "Returns before/after state including extensionDataVersion.",
+        inputSchema: {
+            containerId: z.string().describe("Cosmo container id."),
+            appId: z.string().describe("App id GUID whose data is deleted."),
+            confirm: z.literal(true).describe("Must be true: the app's tables and data are deleted."),
+            versionText: z.string().optional().describe("Published version to run Sync-NAVApp -Mode Clean with (default: highest)."),
+            tenant: z.string().optional(),
+            ...sshCommonSchema,
+        },
+    }, async ({ containerId, appId, confirm, versionText, tenant, ...sshArgs }) => {
+        if (confirm !== true)
+            throw new Error("confirm=true is required.");
+        if (!isGuid(appId))
+            throw new Error("appId must be a GUID.");
+        const script = buildCleanAppDataScript({ appId, version: versionText, tenant });
+        return json(await runContainerScript(containerId.trim(), script, { label: "clean", ...sshArgs }));
+    });
     // ── bc_dev_run_tests ──────────────────────────────────────────────────────
     server.registerTool("bc_dev_run_tests", {
         title: "Run AL unit tests (Cosmo SSH / BcContainerHelper)",
@@ -565,12 +727,31 @@ export function registerDevServicesTools(server) {
             testCodeunit: z
                 .string()
                 .optional()
-                .describe("Optional test codeunit id or name filter."),
+                .describe("Optional test codeunit id, id filter (e.g. 96900..96962|96964..96999) or name filter. " +
+                "Ids and id filters run through page 130455's TestCodeunitRange."),
             testCodeunitRange: z
                 .string()
                 .optional()
-                .describe("Optional TestCodeunitRange for page 130455 (e.g. 50100..50199). " +
-                "Wins over a numeric testCodeunit mapped to id..id."),
+                .describe("Optional TestCodeunitRange for page 130455 (e.g. 50100..50199 or 50100..50149|50160..50199). " +
+                "Wins over testCodeunit."),
+            excludeCodeunits: z
+                .array(z.number().int().positive())
+                .optional()
+                .describe("Test codeunit ids to leave out (e.g. codeunits that clear secrets on shared containers). Subtracted from " +
+                "testCodeunitRange / the testCodeunit id filter, or — with only extensionId — from the extension's id ranges."),
+            testRunnerCodeunitId: z
+                .union([z.number().int().positive(), z.string().regex(/^\d+$/)])
+                .optional()
+                .describe("Test runner codeunit on page 130455: 130450 (isolation per codeunit, default) or 130451 (isolation disabled — " +
+                "needed for codeunits with RequiredTestIsolation = Disabled, which otherwise fail with 'Sessions can only be started…')."),
+            testIsolation: z
+                .enum(["Disabled", "Codeunit"])
+                .optional()
+                .describe("Shorthand for testRunnerCodeunitId: Disabled → 130451, Codeunit → 130450."),
+            requiredTestIsolation: z
+                .enum(["None", "Disabled", "Codeunit", "Function"])
+                .optional()
+                .describe("Page 130455 filter: run only codeunits declaring this RequiredTestIsolation (pair Disabled with testIsolation=Disabled)."),
             testFunction: z.string().optional().describe("Optional test function name filter."),
             testSuite: z.string().optional().describe("Test suite name (default DEFAULT)."),
             companyName: z

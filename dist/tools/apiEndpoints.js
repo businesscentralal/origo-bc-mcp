@@ -10,6 +10,54 @@ function validateEntity(name) {
         throw new Error(`Invalid entity name: '${name}'.`);
     }
 }
+/**
+ * Bound actions bc_api_request may call, per entity set. Only these — a bound action changes
+ * state, so the list stays explicit. Key must be a GUID; method must be POST.
+ */
+export const BOUND_ACTIONS = {
+    extensions: [
+        "Microsoft.NAV.install",
+        "Microsoft.NAV.uninstall",
+        "Microsoft.NAV.uninstallAndDeleteExtensionData",
+        "Microsoft.NAV.unpublish",
+    ],
+};
+/** Default API route for entity sets that only exist on a non-standard API. */
+const BOUND_ACTION_ROUTES = {
+    extensions: { publisher: "microsoft", group: "automation", version: "v2.0" },
+};
+const BOUND_ACTION_RE = /^([a-zA-Z][a-zA-Z0-9_]*)\(([0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12})\)\/([A-Za-z][A-Za-z0-9_.]*)$/;
+/**
+ * Validates `entity` for bc_api_request. Either a plain entity set name, or a whitelisted bound
+ * action `<entitySet>(<guid>)/<Namespace.Action>` (POST only, no separate id).
+ */
+export function resolveApiEntity(entity, method, id) {
+    if (entity.includes("(") || entity.includes("/")) {
+        const m = BOUND_ACTION_RE.exec(entity.trim());
+        if (!m) {
+            throw new Error(`Invalid entity '${entity}'. Bound actions must look like extensions(<guid>)/Microsoft.NAV.install.`);
+        }
+        const [, entitySet, key, action] = m;
+        const allowed = BOUND_ACTIONS[entitySet];
+        if (!allowed || !allowed.includes(action)) {
+            const list = Object.entries(BOUND_ACTIONS)
+                .flatMap(([set, actions]) => actions.map((a) => `${set}(<guid>)/${a}`))
+                .join(", ");
+            throw new Error(`Bound action '${entitySet}/${action}' is not allowed. Allowed: ${list}.`);
+        }
+        if (method !== "POST")
+            throw new Error(`Bound action ${action} must be called with POST.`);
+        if (id)
+            throw new Error("Do not pass id with a bound action; the key is part of entity.");
+        return {
+            path: `${entitySet}(${key.toLowerCase()})/${action}`,
+            boundAction: { entitySet, key: key.toLowerCase(), action },
+            defaultRoute: BOUND_ACTION_ROUTES[entitySet],
+        };
+    }
+    validateEntity(entity);
+    return { path: id ? `${entity}(${id})` : entity };
+}
 function parseEntitySets(xml) {
     const sets = [];
     const re = /<EntitySet\s+[^>]*Name="([^"]+)"[^>]*EntityType="([^"]+)"[^>]*\/?>/g;
@@ -165,9 +213,14 @@ export function registerApiEndpointTools(server) {
             "work correctly, test filters, or perform CRUD operations via the API layer.\n\n" +
             "GET: returns matching records. POST: sends body to create a record. " +
             "PATCH: updates a record by id (requires id, body). DELETE: removes a record by id. " +
-            "PATCH and DELETE send an If-Match header (etag or '*').",
+            "PATCH and DELETE send an If-Match header (etag or '*').\n\n" +
+            "Bound actions (POST only, whitelisted): entity 'extensions(<packageId guid>)/Microsoft.NAV.install' " +
+            "(also uninstall, uninstallAndDeleteExtensionData, unpublish). These default to the microsoft/automation/v2.0 " +
+            "route and an empty body.",
         inputSchema: {
-            entity: z.string().describe("Entity set name (e.g. 'customers')."),
+            entity: z
+                .string()
+                .describe("Entity set name (e.g. 'customers'), or a whitelisted bound action 'extensions(<guid>)/Microsoft.NAV.install'."),
             method: z.enum(["GET", "POST", "PATCH", "DELETE"]).default("GET").describe("HTTP method."),
             id: z.string().optional().describe("Record GUID — required for PATCH and DELETE."),
             body: z.record(z.unknown()).optional().describe("Request payload — required for POST and PATCH."),
@@ -180,19 +233,21 @@ export function registerApiEndpointTools(server) {
             ...apiRouteSchema,
         },
     }, async ({ entity, method, id, body, etag, filter, select, top, orderby, expand, publisher, group, version, companyId }) => {
-        validateEntity(entity);
+        const resolved = resolveApiEntity(entity, method, id);
         const t = await resolveTarget({ companyId });
-        const opts = publisher && group && version ? { publisher, group, version } : undefined;
+        const route = publisher && group && version ? { publisher, group, version } : resolved.defaultRoute;
+        const opts = route ? { ...route } : undefined;
         if ((method === "PATCH" || method === "DELETE") && !id) {
             throw new Error(`${method} requires an id (record GUID).`);
         }
+        // A bound action takes an empty body by default.
+        if (resolved.boundAction && !body)
+            body = {};
         if ((method === "POST" || method === "PATCH") && !body) {
             throw new Error(`${method} requires a body.`);
         }
-        // Build the resource path: companies({companyId})/entity or companies({companyId})/entity({id})
-        let path = `companies(${t.companyId})/${entity}`;
-        if (id)
-            path += `(${id})`;
+        // Build the resource path: companies({companyId})/entity, …/entity({id}) or …/entity(<guid>)/<action>
+        const path = `companies(${t.companyId})/${resolved.path}`;
         // OData query params (GET only, but $select/$expand can be useful on POST/PATCH responses too)
         const params = {};
         if (filter)
@@ -225,6 +280,12 @@ export function registerApiEndpointTools(server) {
             result.rows = rows;
             if (resBody?.["@odata.context"])
                 result.odataContext = resBody["@odata.context"];
+        }
+        else if (resolved.boundAction) {
+            result.boundAction = resolved.boundAction;
+            result.ok = res.status >= 200 && res.status < 300;
+            if (resBody)
+                result.response = resBody;
         }
         else if (method === "POST") {
             result.created = resBody;

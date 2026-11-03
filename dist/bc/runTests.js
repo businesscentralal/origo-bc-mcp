@@ -53,6 +53,72 @@ function truncate(s, max = 8000) {
 function escPs(s) {
     return s.replace(/'/g, "''");
 }
+/** Test runner codeunits on page 130455 (Test Runner app). */
+export const TEST_RUNNER_ISOLATION_CODEUNIT = 130450;
+export const TEST_RUNNER_ISOLATION_DISABLED = 130451;
+/** testRunnerCodeunitId wins; else testIsolation Disabled → 130451 / Codeunit → 130450; else none. */
+export function resolveTestRunnerCodeunitId(input) {
+    const explicit = String(input?.testRunnerCodeunitId ?? "").trim();
+    if (explicit) {
+        if (!/^\d+$/.test(explicit))
+            throw new Error(`testRunnerCodeunitId must be a codeunit number, got '${explicit}'.`);
+        return explicit;
+    }
+    if (input?.testIsolation === "Disabled")
+        return String(TEST_RUNNER_ISOLATION_DISABLED);
+    if (input?.testIsolation === "Codeunit")
+        return String(TEST_RUNNER_ISOLATION_CODEUNIT);
+    return "";
+}
+/** An AL filter over codeunit ids: numbers, `..` ranges and `|` alternatives only. */
+const ID_FILTER_RE = /^\s*(\d+|\d*\s*\.\.\s*\d*)(\s*\|\s*(\d+|\d*\s*\.\.\s*\d*))*\s*$/;
+export function isIdFilter(value) {
+    return ID_FILTER_RE.test(value) && /\d/.test(value);
+}
+export function parseIdFilter(filter) {
+    if (!isIdFilter(filter)) {
+        throw new Error(`'${filter}' is not a codeunit id filter (use numbers, '..' ranges and '|').`);
+    }
+    return filter.split("|").map((raw) => {
+        const part = raw.replace(/\s+/g, "");
+        if (!part.includes("..")) {
+            const n = Number(part);
+            return { from: n, to: n };
+        }
+        const [a, b] = part.split("..");
+        const from = a ? Number(a) : null;
+        const to = b ? Number(b) : null;
+        if (from !== null && to !== null && from > to)
+            throw new Error(`Range '${part}' runs backwards.`);
+        return { from, to };
+    });
+}
+function formatInterval(i) {
+    if (i.from !== null && i.from === i.to)
+        return String(i.from);
+    return `${i.from ?? ""}..${i.to ?? ""}`;
+}
+/** `filter` minus the excluded ids, as an AL filter (e.g. 96900..96999 minus 96963 → 96900..96962|96964..96999). */
+export function subtractIds(filter, exclude) {
+    const ex = [...new Set(exclude.filter((n) => Number.isInteger(n)))].sort((a, b) => a - b);
+    const out = [];
+    for (const iv of parseIdFilter(filter)) {
+        let cur = { ...iv };
+        for (const x of ex) {
+            if (!cur)
+                break;
+            if ((cur.from !== null && x < cur.from) || (cur.to !== null && x > cur.to))
+                continue;
+            if (cur.from === null || x > cur.from)
+                out.push({ from: cur.from, to: x - 1 });
+            // Nothing of this interval is left when x was its upper end.
+            cur = cur.to !== null && x + 1 > cur.to ? undefined : { from: x + 1, to: cur.to };
+        }
+        if (cur)
+            out.push(cur);
+    }
+    return out.map(formatInterval).join("|");
+}
 /**
  * Page 130455 (Command Line Test Tool) loads codeunits in
  * TestCodeunitRangeFilter.OnValidate → SelectTestMethodsByRange.
@@ -61,19 +127,42 @@ function escPs(s) {
  * quick-filter matches nothing, so Run-Tests saves an empty `<testsuites/>`
  * after logging `Setting test codeunit range ''`.
  *
- * A numeric testCodeunit is therefore applied as `id..id` on page 130455 and is
- * not also passed as TestCodeunit. Name/wildcard filters still use TestCodeunit.
- * An explicit testCodeunitRange wins. Other test pages keep the original id.
+ * A numeric testCodeunit — or any id filter such as `96900..96962|96964..96999` — is therefore
+ * applied as TestCodeunitRange on page 130455 and not also passed as TestCodeunit. Name/wildcard
+ * filters still use TestCodeunit. An explicit testCodeunitRange wins. Other test pages keep the
+ * original value.
+ *
+ * excludeCodeunits subtracts ids from that range. Without a range the remote script derives the
+ * extension's id ranges from Get-NAVAppInfo (`excludeNeedsExtensionRange`).
  */
 export function clientServicesCodeunitFilter(input) {
     const testCodeunit = String(input?.testCodeunit ?? "").trim();
-    const explicitRange = String(input?.testCodeunitRange ?? "").trim();
+    const explicitRange = String(input?.testCodeunitRange ?? "").trim().replace(/\s+/g, "");
     const numericId = /^\d+$/.test(testCodeunit) ? testCodeunit : "";
-    const testCodeunitRange = explicitRange || (numericId ? `${numericId}..${numericId}` : "");
-    // Numeric ids are carried by the range filter. Passing them as TestCodeunit
+    const idFilter = !numericId && isIdFilter(testCodeunit) ? testCodeunit.replace(/\s+/g, "") : "";
+    let testCodeunitRange = explicitRange || (numericId ? `${numericId}..${numericId}` : idFilter);
+    // Numeric ids and id filters are carried by the range filter. Passing them as TestCodeunit
     // skips RunNextTest and the repeater path returns no rows.
-    const testCodeunitOn130455 = numericId ? "" : testCodeunit;
-    return { testCodeunit, testCodeunitRange, testCodeunitOn130455 };
+    const testCodeunitOn130455 = numericId || idFilter ? "" : testCodeunit;
+    const exclude = (input?.excludeCodeunits ?? []).filter((n) => Number.isInteger(n) && n > 0);
+    let excludeNeedsExtensionRange = false;
+    if (exclude.length) {
+        if (testCodeunitOn130455) {
+            throw new Error("excludeCodeunits cannot be combined with a codeunit name filter; use ids or a range.");
+        }
+        if (testCodeunitRange) {
+            testCodeunitRange = subtractIds(testCodeunitRange, exclude);
+            if (!testCodeunitRange)
+                throw new Error("excludeCodeunits removes every codeunit in the range.");
+        }
+        else if (String(input?.extensionId ?? "").trim()) {
+            excludeNeedsExtensionRange = true;
+        }
+        else {
+            throw new Error("excludeCodeunits needs extensionId or a testCodeunitRange to subtract from.");
+        }
+    }
+    return { testCodeunit, testCodeunitRange, testCodeunitOn130455, excludeNeedsExtensionRange };
 }
 function resolveSshUser(input) {
     return (input.sshUser?.trim() ||
@@ -248,6 +337,9 @@ export function buildRemoteTestScript(input, conn, opts) {
     const remotePs = opts?.remotePsTestFunctions || "";
     const remoteCc = opts?.remoteClientContext || "";
     const codeunitFilter = clientServicesCodeunitFilter(input);
+    const testRunnerCodeunitId = resolveTestRunnerCodeunitId(input);
+    const requiredIsolation = input.requiredTestIsolation ?? "";
+    const exclude = (input.excludeCodeunits ?? []).filter((n) => Number.isInteger(n) && n > 0);
     const lines = [
         "$ErrorActionPreference = 'Continue'",
         "Write-Host '[MCP] bc_dev_run_tests remote start'",
@@ -260,6 +352,10 @@ export function buildRemoteTestScript(input, conn, opts) {
         `$testCodeunitRange = '${escPs(codeunitFilter.testCodeunitRange)}'`,
         `$testCodeunitOn130455 = '${escPs(codeunitFilter.testCodeunitOn130455)}'`,
         `$testFunction = '${escPs(input.testFunction || "")}'`,
+        `$testRunnerCodeunitId = '${escPs(testRunnerCodeunitId)}'`,
+        `$requiredTestIsolation = '${escPs(requiredIsolation)}'`,
+        `$excludeCodeunits = @(${exclude.join(",")})`,
+        `$excludeNeedsExtensionRange = $${codeunitFilter.excludeNeedsExtensionRange ? "true" : "false"}`,
         `$user = '${escPs(user)}'`,
         `$passPlain = '${escPs(pass)}'`,
         `$uploadedPsTest = '${escPs(remotePs)}'`,
@@ -271,6 +367,41 @@ export function buildRemoteTestScript(input, conn, opts) {
         `if (Test-Path 'C:\\Run\\Prompt.ps1') {`,
         `  Write-Host '[MCP] Dot-sourcing C:\\Run\\Prompt.ps1'`,
         `  . 'C:\\Run\\Prompt.ps1'`,
+        `}`,
+        `# --- excludeCodeunits without a range: extension id ranges minus the excluded ids ---`,
+        `function Get-McpRangeMinus([array]$ranges, [long[]]$excl) {`,
+        `  $parts = New-Object System.Collections.Generic.List[string]`,
+        `  $sorted = @($excl | Sort-Object -Unique)`,
+        `  foreach ($r in $ranges) {`,
+        `    $cur = [long]$r[0]; $to = [long]$r[1]`,
+        `    foreach ($x in $sorted) {`,
+        `      if ($x -lt $cur -or $x -gt $to) { continue }`,
+        `      if ($x -gt $cur) { if (($x - 1) -eq $cur) { $parts.Add("$cur") } else { $parts.Add("$cur..$($x - 1)") } }`,
+        `      $cur = $x + 1`,
+        `    }`,
+        `    if ($cur -le $to) { if ($cur -eq $to) { $parts.Add("$cur") } else { $parts.Add("$cur..$to") } }`,
+        `  }`,
+        `  return ($parts -join '|')`,
+        `}`,
+        `if ($excludeNeedsExtensionRange) {`,
+        `  $ranges = @()`,
+        `  try {`,
+        `    $siR = 'BC'`,
+        `    if (Get-Command Get-NAVServerInstance -ErrorAction SilentlyContinue) { $i = Get-NAVServerInstance | Select-Object -First 1; if ($i) { $siR = ($i.ServerInstance -replace '^.*\\$', '') } }`,
+        `    $appInfo = Get-NAVAppInfo -ServerInstance $siR -Id $extensionId -ErrorAction Stop | Sort-Object { [version]"$($_.Version)" } -Descending | Select-Object -First 1`,
+        `    foreach ($ir in @($appInfo.IdRanges)) {`,
+        `      $from = @($ir.MinObjectId, $ir.FromObjectId, $ir.From, $ir.Start) | Where-Object { $_ -ne $null } | Select-Object -First 1`,
+        `      $to = @($ir.MaxObjectId, $ir.ToObjectId, $ir.To, $ir.End) | Where-Object { $_ -ne $null } | Select-Object -First 1`,
+        `      if ($from -ne $null -and $to -ne $null) { $ranges += ,@([long]$from, [long]$to) }`,
+        `    }`,
+        `  } catch { Write-Host "[MCP] Get-NAVAppInfo for extension id ranges failed: $($_.Exception.Message)" }`,
+        `  if (-not $ranges.Count) {`,
+        `    Write-Host '[MCP] excludeCodeunits: could not read the extension id ranges; pass testCodeunitRange (e.g. 96900..96999) together with excludeCodeunits.'`,
+        `    exit 4`,
+        `  }`,
+        `  $testCodeunitRange = Get-McpRangeMinus $ranges $excludeCodeunits`,
+        `  Write-Host "[MCP] excludeCodeunits: extension ranges minus $($excludeCodeunits -join ',') -> TestCodeunitRange '$testCodeunitRange'"`,
+        `  if (-not $testCodeunitRange) { Write-Host '[MCP] excludeCodeunits removes every codeunit of the extension.'; exit 4 }`,
         `}`,
         `# --- Path 1: host-side BcContainerHelper cmdlets (rare on Cosmo SSH) ---`,
         `# Run-TestsInBcContainer / Invoke-NavContainerTests drive a container through docker, so they only work on a`,
@@ -292,7 +423,11 @@ export function buildRemoteTestScript(input, conn, opts) {
         `  if ($companyName) { $params.companyName = $companyName }`,
         `  if ($testSuite) { $params.testSuite = $testSuite }`,
         `  if ($extensionId) { $params.extensionId = $extensionId }`,
-        `  if ($testCodeunit) { $params.testCodeunit = $testCodeunit }`,
+        `  $cmdParams = (Get-Command $cmd).Parameters`,
+        `  if ($testCodeunitRange -and $cmdParams.ContainsKey('testCodeunitRange')) { $params.testCodeunitRange = $testCodeunitRange; if ($testCodeunitOn130455) { $params.testCodeunit = $testCodeunitOn130455 } }`,
+        `  elseif ($testCodeunit) { $params.testCodeunit = $testCodeunit }`,
+        `  if ($testRunnerCodeunitId -and $cmdParams.ContainsKey('testRunnerCodeunitId')) { $params.testRunnerCodeunitId = $testRunnerCodeunitId }`,
+        `  if ($requiredTestIsolation -and $cmdParams.ContainsKey('requiredTestIsolation')) { $params.requiredTestIsolation = $requiredTestIsolation }`,
         `  if ($testFunction) { $params.testFunction = $testFunction }`,
         `  try { $params.JUnitResultFileName = $junit } catch { }`,
         `  if ($cmd -eq 'Run-TestsInBcContainer' -or $cmd -eq 'Invoke-NavContainerTests') {`,
@@ -444,7 +579,9 @@ export function buildRemoteTestScript(input, conn, opts) {
         `            # and the repeater quick-filter returns an empty suite.`,
         `            if ($testCodeunitRange) { $rtParams.TestCodeunitRange = $testCodeunitRange }`,
         `            if ($testCodeunitOn130455) { $rtParams.TestCodeunit = $testCodeunitOn130455 }`,
-        `            Write-Host "[MCP] Page 130455 filters TestCodeunitRange='$testCodeunitRange' TestCodeunit='$testCodeunitOn130455'"`,
+        `            if ($testRunnerCodeunitId) { $rtParams.testRunnerCodeunitId = $testRunnerCodeunitId }`,
+        `            if ($requiredTestIsolation) { $rtParams.requiredTestIsolation = $requiredTestIsolation }`,
+        `            Write-Host "[MCP] Page 130455 filters TestCodeunitRange='$testCodeunitRange' TestCodeunit='$testCodeunitOn130455' TestRunner='$testRunnerCodeunitId' RequiredTestIsolation='$requiredTestIsolation'"`,
         `          } elseif ($testCodeunit) {`,
         `            $rtParams.TestCodeunit = $testCodeunit`,
         `          }`,
@@ -856,6 +993,21 @@ function sshBlockedResult(ssh) {
 }
 export async function runBcTests(input, conn) {
     const mode = input.mode || "auto";
+    // Reject bad filters before touching SSH.
+    try {
+        clientServicesCodeunitFilter(input);
+        resolveTestRunnerCodeunitId(input);
+    }
+    catch (err) {
+        return {
+            ok: false,
+            mode: "blocked",
+            exitCode: 1,
+            durationMs: 0,
+            cosmoExecTestEndpoint: "none",
+            error: err instanceof Error ? err.message : String(err),
+        };
+    }
     if (mode === "helper") {
         return runHelperLocal(input, conn);
     }
