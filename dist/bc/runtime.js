@@ -180,6 +180,22 @@ export async function bcTask(tenantId, environment, companyId, envelope) {
         const [, tenant, guid] = malformedMatch;
         dataStr = dataStr.replace(`/responses?tenant=${tenant}(${guid})/data`, `/responses(${guid})/data?tenant=${tenant}`);
     }
+    // On-prem BC builds the data URL from its own PublicODataBaseUrl (often http://localhost:7048), which differs
+    // from the host the connection uses (e.g. host.docker.internal from inside a container). When the path is
+    // under the connection's base path, rebase the URL onto the connection's origin so it can be followed.
+    if (ctx.conn.onPrem && ctx.conn.baseUrl) {
+        try {
+            const d = new URL(dataStr);
+            const b = new URL(ctx.conn.baseUrl);
+            const basePath = b.pathname.replace(/\/+$/, "");
+            if (d.origin !== b.origin && basePath && d.pathname.startsWith(basePath + "/")) {
+                dataStr = b.origin + d.pathname + d.search;
+            }
+        }
+        catch {
+            /* leave dataStr unchanged */
+        }
+    }
     const isSaas = dataStr.startsWith(`https://${BC_HOST}/`);
     const isOnPrem = ctx.conn.onPrem &&
         (() => {
