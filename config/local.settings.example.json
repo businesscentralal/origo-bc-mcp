@@ -16,6 +16,19 @@
     "companyName": "OnPrem",
     "environment": "onprem"
   },
+  "_devConnection_native_bc_example": {
+    "_comment": "Native (non-container) multitenant BC on the MCP host. bc_dev_run_tests mode=local (auto picks it) uses clientServicesUrl + testAssembliesPath; paths are as seen by the MCP process.",
+    "onPrem": true,
+    "baseUrl": "http://host.docker.internal:7048/BC290/api/v2.0",
+    "developerBaseUrl": "http://host.docker.internal:7049/BC290/dev",
+    "clientServicesUrl": "http://host.docker.internal:8080/BC290/",
+    "testAssembliesPath": "/mcp-runtime/bc29-test-assemblies",
+    "onPremTenant": "w129-01",
+    "user": "<bc-user>",
+    "key": "<bc-password | env:VAR_NAME | aes:base64>",
+    "companyName": "CRONUS International Ltd.",
+    "environment": "onprem"
+  },
   "_devConnection_saas_example": {
     "tenantId": "<entra-tenant-guid>",
     "clientId": "<app-client-id>",

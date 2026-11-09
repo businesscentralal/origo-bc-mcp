@@ -722,7 +722,7 @@ These talk to a container's `{id}dev` / Automation endpoints — not the Cosmo A
 | `bc_dev_sync_app` | `Sync-NAVApp` (Add / Development / ForceSync / Clean) for one published version over Cosmo SSH; `Clean` needs `confirm=true` |
 | `bc_dev_clean_app_data` | **Destructive**, `appId` + `confirm=true`: uninstall with `-DoNotSaveData` (+ `-ClearSchema`), then `Sync-NAVApp -Mode Clean` against a published version — drops leftover data so an older version installs again |
 | `bc_dev_assign_premium_plan` | Gives container users the BC **Premium** plan (as BcContainerHelper `-assignPremiumPlan`): inserts the `User Plan` row (Plan ID `8e9002c0-a1d8-4465-b952-817d2948e6e2`) per user in the tenant database with `Invoke-Sqlcmd`, idempotent, Essential row kept. Default users: every Enabled Full User; `userName`, `tenant`, `dryRun`. Returns per-user plans before/after |
-| `bc_dev_run_tests` | Run AL unit tests via **Cosmo SSH** (`scp` + `pwsh`/`powershell -File`). Cosmo SSH is **in-container** — uses Client Services / PsTestFunctions (not host BcContainerHelper); structured passed/failed/skipped + failure messages |
+| `bc_dev_run_tests` | Run AL unit tests via **Cosmo SSH** (`scp` + `pwsh`/`powershell -File`; in-container Client Services / PsTestFunctions), or with `mode=local` against a **native (non-container) BC** over Client Services from pwsh in the MCP host; structured passed/failed/skipped + failure messages |
 
 **`developerBaseUrl`:** set optional `developerBaseUrl` on `devConnection`, or derive it from on-prem `baseUrl` by replacing a trailing `rest` with `dev` (Alpaca: `…/f0a4d51d4d47rest` → `…/f0a4d51d4d47dev`). After `cosmo_get_container`, wire the derived `restBaseUrl` / `developerBaseUrl` into `devConnection` (company typically CRONUS IS). Verified publish path on Cosmo Alpaca: multipart `/dev/apps` → HTTP 200.
 
@@ -748,6 +748,33 @@ The SSH-based lifecycle tools share one transport (`src/bc/containerScript.ts`):
 4. Soft diagnostics via `Get-NAVAppInfo` if runners fail (toolkit is often already present on Cosmo; do not treat publish as a hard gate).
 
 Brief SSH connect retries while Starting. When ip/key are missing, returns a **blocked** error (no silent fallback) with Stop→Start recreate + `cosmo_create_container`/`sshEnabled=true` hints. Cosmo OpenAPI has **no** `/Container/Exec/{id}/…` test-runner endpoint. `mode=helper` is local-docker only (`containerName`). Reuses stdio/`devConnection` NavUserPassword credentials. Returns structured counts + failure messages (truncated previews; never logs `privateKey` / Nav passwords beyond truncated previews).
+
+**Native BC (`mode=local`).** For a BC server installed directly on a machine (no container, no SSH) — e.g. the multitenant BC 29 install on the MCP host (`BC290` W1 / `BC290IS` IS, tenants `w129-0N` / `is29-0N`). The MCP runs the same bundled `PsTestFunctions.ps1` / `ClientContext.ps1` with **pwsh in its own host** (inside the Linux MCP container), loads the BC **Test Assemblies** (`Microsoft.Dynamics.Framework.UI.Client.dll` + `Newtonsoft.Json.dll`; netstandard2.0, loads in pwsh 7.6 on Linux) and opens `<clientServicesUrl>cs?tenant=<onPremTenant>&company=<companyName>` through the web client. Same inputs (`extensionId`, `testCodeunit`, `testCodeunitRange`, `testFunction`, `testRunnerCodeunitId` / `testIsolation`, `requiredTestIsolation`, `excludeCodeunits`) and the same result shape (JUnit parsed with `parseJunit`), plus `local: { clientServicesUrl, serviceUrl, testAssembliesPath }`.
+
+- **Design choice:** pwsh inside the MCP container (Option A), not a Windows-host runner: the Client DLL is portable and the web client's `/cs` endpoint is reachable at `host.docker.internal`, so nothing needs to run on the Windows host.
+- **Mode selection:** `mode=local` forces it. `mode=auto` (default) picks it when the connection is on-prem, the call has no `containerId` / `containerName`, and a web client URL is known: `clientServicesUrl` on the connection (or tool input), else derived from `baseUrl` = host + first path segment (the server instance) on port `MCP_BC_WEB_CLIENT_PORT` (default `8080`), e.g. `http://host.docker.internal:7048/BC290/api/v2.0` → `http://host.docker.internal:8080/BC290/`. Cosmo bases (`…/{id}rest`) are never derived, so Cosmo connections keep the SSH path. `mode=ssh` / `mode=helper` are unchanged.
+- **Connection fields (optional):** `clientServicesUrl` (web client base URL; a trailing `/cs` and query are stripped) and `testAssembliesPath` (folder as seen by the MCP process; fallback env `MCP_BC_TEST_ASSEMBLIES_PATH`). Use the Test Assemblies of the **same BC version** as the server (`platform/Test Assemblies` in the BC artifact or the DVD).
+- **Credentials:** the connection's NavUserPassword `user` / `key`, passed to pwsh as environment variables (never written to the script file, never in `commandPreview`; previews are additionally redacted). Timezone sent to BC defaults to `UTC` (`MCP_BC_TEST_TIMEZONE`).
+- **pwsh:** `pwsh` on `PATH` or `MCP_PWSH_PATH`. The repo `Dockerfile` installs PowerShell 7.6 (`PWSH_VERSION`, Alpine musl x64).
+- **Limits:** `excludeCodeunits` with only `extensionId` needs `Get-NAVAppInfo`, so in `mode=local` pass `testCodeunitRange` together with `excludeCodeunits`. No Option B (`Invoke-NAVCodeunit`) fallback. Test Runner / Test Toolkit apps must be published in the tenant. Exit codes: 2 tests failed, 3 every test page failed, 4 setup (credentials, assemblies, assembly load).
+
+Example connection (no secrets; `key` as `aes:` / `env:` like any other connection):
+
+```json
+"w129-01": {
+  "onPrem": true,
+  "baseUrl": "http://host.docker.internal:7048/BC290/api/v2.0",
+  "developerBaseUrl": "http://host.docker.internal:7049/BC290/dev",
+  "clientServicesUrl": "http://host.docker.internal:8080/BC290/",
+  "testAssembliesPath": "/mcp-runtime/bc29-test-assemblies",
+  "onPremTenant": "w129-01",
+  "companyName": "CRONUS International Ltd.",
+  "user": "<bc-user>",
+  "key": "<aes:… | env:VAR>"
+}
+```
+
+For `is29-0N` use `BC290IS` (`:7148` / `:7149`, web client `http://host.docker.internal:8080/BC290IS/`) and `CRONUS Ísland hf.`. Then `bc_dev_run_tests { "extensionId": "<test app id>" }` (auto → local) or with `"mode": "local"`.
 
 **Follow-up (out of scope here):** `alc` compile orchestration.
 
@@ -871,6 +898,8 @@ docker run -d --name origo-bc-mcp --restart unless-stopped -p 3000:3000 -v "E:\D
 ```bash
 docker run -d --name origo-bc-mcp --restart unless-stopped -p 3000:3000 -v /path/to/origo-bc-mcp-data:/data -e MCP_ENCRYPTION_KEY=<64-hex-chars> -e MCP_ADMIN_USER=admin -e MCP_ADMIN_PASSWORD=<your-password> -e OLLAMA_PROXY_TARGET=http://<ollama-host>:11434 origo-bc-mcp
 ```
+
+> **PowerShell:** the image includes PowerShell 7.6 (`pwsh`) for `bc_dev_run_tests mode=local` (native BC over Client Services). Mount the BC Test Assemblies folder read-only and point `testAssembliesPath` / `MCP_BC_TEST_ASSEMBLIES_PATH` at it. An image built elsewhere needs `pwsh` 7.6+ on `PATH` or `MCP_PWSH_PATH`.
 
 > **`MCP_ENCRYPTION_KEY`** encrypts connection secrets (passwords, client secrets) at rest in the volume. Generate one with: `openssl rand -hex 32`
 >

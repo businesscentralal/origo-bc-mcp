@@ -742,7 +742,7 @@ export function registerDevServicesTools(server) {
     });
     // ── bc_dev_run_tests ──────────────────────────────────────────────────────
     server.registerTool("bc_dev_run_tests", {
-        title: "Run AL unit tests (Cosmo SSH / BcContainerHelper)",
+        title: "Run AL unit tests (Cosmo SSH / BcContainerHelper / native Client Services)",
         description: "Runs AL unit tests against the connected container. " +
             "Preferred: Cosmo SSH when cosmo_ssh_info has ipAddress+privateKey (available flag ignored — " +
             "available=false during Starting is OK). SSH as sshuser with privateKey (never logged) and " +
@@ -750,7 +750,12 @@ export function registerDevServicesTools(server) {
             "If ip/key missing it enables SSH and waits for it (ensureSsh, default on; allowRestart=true also " +
             "permits Stop→Start); the result's sshEnsure lists what was done. Only then a clear blocked error. " +
             "Cosmo has no /Container/Exec/{id} test-runner endpoint (only deployApp/appinfo/restartServerInstance/…). " +
-            "mode=helper is local-docker only (containerName). Reuses stdio/devConnection NavUserPassword auth. " +
+            "mode=helper is local-docker only (containerName). " +
+            "mode=local runs against a NATIVE (non-container) BC install: pwsh in the MCP host loads the BC Test Assemblies " +
+            "(testAssembliesPath) and opens the web client's Client Services endpoint (clientServicesUrl, e.g. " +
+            "http://host.docker.internal:8080/BC290/, + /cs?tenant=&company=); no SSH or docker. mode=auto picks local " +
+            "for an on-prem connection without containerId/containerName when a web client URL is configured or derivable. " +
+            "Reuses stdio/devConnection NavUserPassword auth. " +
             "Returns structured passed/failed/skipped + failure messages (not megabyte dumps). " +
             "Cosmo lifecycle tools stay separate (cosmo_*).",
         inputSchema: {
@@ -796,15 +801,27 @@ export function registerDevServicesTools(server) {
             containerId: z
                 .string()
                 .optional()
-                .describe("Cosmo container id — required for mode=auto|ssh (e.g. f0a4d51d4d47)."),
+                .describe("Cosmo container id — required for mode=ssh and for mode=auto on Cosmo (e.g. f0a4d51d4d47)."),
             containerName: z
                 .string()
                 .optional()
                 .describe("Local docker BC container name (mode=helper only)."),
             mode: z
-                .enum(["auto", "ssh", "helper"])
+                .enum(["auto", "ssh", "helper", "local"])
                 .optional()
-                .describe("auto/ssh: Cosmo SSH path; helper: local docker only. Default auto."),
+                .describe("auto/ssh: Cosmo SSH path; helper: local docker only; local: native BC over Client Services (pwsh in the MCP host). " +
+                "Default auto (local for on-prem connections without containerId when a web client URL is known)."),
+            clientServicesUrl: z
+                .string()
+                .url()
+                .optional()
+                .describe("mode=local: web client base URL of the native BC instance (e.g. http://host.docker.internal:8080/BC290/). " +
+                "Default: connection clientServicesUrl, else baseUrl host + instance on port MCP_BC_WEB_CLIENT_PORT (8080)."),
+            testAssembliesPath: z
+                .string()
+                .optional()
+                .describe("mode=local: folder (as seen by the MCP process) with the BC Test Assemblies " +
+                "(Microsoft.Dynamics.Framework.UI.Client.dll). Default: connection testAssembliesPath, else MCP_BC_TEST_ASSEMBLIES_PATH."),
             sshUser: z
                 .string()
                 .optional()

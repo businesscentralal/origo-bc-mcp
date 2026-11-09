@@ -26,6 +26,14 @@
  * Cosmo OpenAPI (Alpaca release) has NO /Container/Exec/{id}/… test runner —
  * only deployApp, appinfo, restartServerInstance, backup, dllCollection,
  * eventlog, prepareForBaseApp. mode=helper is explicit local-docker only.
+ *
+ * mode=local (native, non-container BC, e.g. the BC 29 install on the MCP host):
+ * runs the same vendored PsTestFunctions / ClientContext with **pwsh inside the
+ * MCP process's own host** (the Linux MCP container) against the web client's
+ * Client Services endpoint (<clientServicesUrl>/cs?tenant=&company=). The BC
+ * "Test Assemblies" (Microsoft.Dynamics.Framework.UI.Client.dll, netstandard2.0)
+ * load in pwsh 7 on Linux. Credentials go to pwsh via environment variables,
+ * never into the script file or any preview.
  */
 import { spawn } from "node:child_process";
 import { mkdtempSync, writeFileSync, readFileSync, existsSync, rmSync, chmodSync, } from "node:fs";
@@ -955,6 +963,268 @@ async function runHelperLocal(input, conn) {
         commandPreview: `${pwsh} -File run-tests.ps1 # containerName=${containerName}`,
     };
 }
+// ── mode=local: native BC (no container) over Client Services ───────────────
+const LOCAL_SETUP_HINT = "mode=local runs pwsh in the MCP host against the native BC web client's Client Services endpoint. Needs: " +
+    "(1) pwsh 7.6+ on PATH or MCP_PWSH_PATH, " +
+    "(2) the BC 'Test Assemblies' folder of the SAME BC version (Microsoft.Dynamics.Framework.UI.Client.dll + Newtonsoft.Json.dll) " +
+    "readable by the MCP — connection testAssembliesPath or env MCP_BC_TEST_ASSEMBLIES_PATH, " +
+    "(3) the web client reachable from the MCP — connection clientServicesUrl (e.g. http://host.docker.internal:8080/BC290/) " +
+    "or derived from baseUrl host + first path segment on port MCP_BC_WEB_CLIENT_PORT (default 8080), " +
+    "(4) NavUserPassword user/key on the connection, and Test Runner / Test Toolkit apps published in the tenant.";
+/** Strip query, trailing '/' and a trailing '/cs' so the value is the web client base URL. */
+export function normalizeWebClientBase(url) {
+    const u = new URL(url.trim());
+    let path = u.pathname.replace(/\/+$/, "");
+    path = path.replace(/\/cs$/i, "");
+    return `${u.protocol}//${u.host}${path}/`;
+}
+/**
+ * Web client base URL for mode=local. Explicit input / connection clientServicesUrl wins.
+ * Otherwise derived from an on-prem baseUrl whose first path segment is the server instance
+ * (http://host.docker.internal:7048/BC290/api/… → http://host.docker.internal:8080/BC290/).
+ * Cosmo bases (…/{id}rest, …/{id}dev) are never derived — they run tests over SSH.
+ */
+export function resolveLocalWebClientBase(input, conn) {
+    const explicit = input.clientServicesUrl?.trim() || conn.clientServicesUrl?.trim();
+    if (explicit)
+        return normalizeWebClientBase(explicit);
+    if (!conn.onPrem || !conn.baseUrl)
+        return undefined;
+    let u;
+    try {
+        u = new URL(conn.baseUrl);
+    }
+    catch {
+        return undefined;
+    }
+    const instance = u.pathname.split("/").filter(Boolean)[0];
+    if (!instance || !/^[A-Za-z][A-Za-z0-9_-]*$/.test(instance) || /(rest|dev)$/i.test(instance))
+        return undefined;
+    const port = (process.env.MCP_BC_WEB_CLIENT_PORT || "8080").trim();
+    return `${u.protocol}//${u.hostname}:${port}/${instance}/`;
+}
+/** Client Services URL the BC client library opens: <webBase>cs?tenant=…&company=…. */
+export function localServiceUrl(webBase, tenant, company) {
+    const q = [`tenant=${encodeURIComponent(tenant)}`];
+    if (company)
+        q.push(`company=${encodeURIComponent(company)}`);
+    return `${webBase}cs?${q.join("&")}`;
+}
+export function resolveTestAssembliesPath(input, conn) {
+    return (input.testAssembliesPath?.trim() ||
+        conn.testAssembliesPath?.trim() ||
+        process.env.MCP_BC_TEST_ASSEMBLIES_PATH?.trim() ||
+        undefined);
+}
+/** True when mode=auto should run locally: on-prem connection, no Cosmo containerId / docker name, a web client URL. */
+export function shouldRunLocal(input, conn) {
+    if (input.containerId?.trim() || input.containerName?.trim())
+        return false;
+    if (!conn.onPrem)
+        return false;
+    return Boolean(resolveLocalWebClientBase(input, conn));
+}
+/**
+ * pwsh script for mode=local. Credentials are NOT embedded: the script reads
+ * MCP_BC_TEST_USER / MCP_BC_TEST_PASSWORD from its environment and clears the password variable.
+ */
+export function buildLocalTestScript(input, opts) {
+    const suite = input.testSuite?.trim() || "DEFAULT";
+    const codeunitFilter = clientServicesCodeunitFilter(input);
+    const testRunnerCodeunitId = resolveTestRunnerCodeunitId(input);
+    const requiredIsolation = input.requiredTestIsolation ?? "";
+    // Linux pwsh reports IANA zone ids; UTC exists under both naming schemes.
+    const timezone = opts.timezone || process.env.MCP_BC_TEST_TIMEZONE?.trim() || "UTC";
+    const lines = [
+        "$ErrorActionPreference = 'Continue'",
+        "Write-Host '[MCP] bc_dev_run_tests local start (native BC, Client Services)'",
+        `$serviceUrl = '${escPs(opts.serviceUrl)}'`,
+        `$testAssemblies = '${escPs(opts.testAssembliesPath)}'`,
+        `$psTestFunctions = '${escPs(opts.psTestFunctions)}'`,
+        `$clientContextScript = '${escPs(opts.clientContext)}'`,
+        `$junit = '${escPs(opts.junitPath)}'`,
+        `$timezone = '${escPs(timezone)}'`,
+        `$testSuite = '${escPs(suite)}'`,
+        `$extensionId = '${escPs(input.extensionId || "")}'`,
+        `$testCodeunit = '${escPs(codeunitFilter.testCodeunit)}'`,
+        `$testCodeunitRange = '${escPs(codeunitFilter.testCodeunitRange)}'`,
+        `$testCodeunitOn130455 = '${escPs(codeunitFilter.testCodeunitOn130455)}'`,
+        `$testFunction = '${escPs(input.testFunction || "")}'`,
+        `$testRunnerCodeunitId = '${escPs(testRunnerCodeunitId)}'`,
+        `$requiredTestIsolation = '${escPs(requiredIsolation)}'`,
+        "$user = $env:MCP_BC_TEST_USER",
+        "$passPlain = $env:MCP_BC_TEST_PASSWORD",
+        "Remove-Item Env:MCP_BC_TEST_PASSWORD -ErrorAction SilentlyContinue",
+        "if (-not $user -or -not $passPlain) { Write-Host '[MCP] NavUserPassword user/key missing on the connection.'; exit 4 }",
+        "$cred = New-Object pscredential($user, (ConvertTo-SecureString $passPlain -AsPlainText -Force))",
+        "$passPlain = $null",
+        "$clientDll = Join-Path $testAssemblies 'Microsoft.Dynamics.Framework.UI.Client.dll'",
+        'if (-not (Test-Path $clientDll)) { Write-Host "[MCP] Microsoft.Dynamics.Framework.UI.Client.dll not found in $testAssemblies"; exit 4 }',
+        "$newton = Join-Path $testAssemblies 'Newtonsoft.Json.dll'",
+        "if (-not (Test-Path $newton)) {",
+        "  $alt = Get-ChildItem $testAssemblies -Recurse -Filter 'Newtonsoft.Json.dll' -ErrorAction SilentlyContinue | Select-Object -First 1",
+        '  if ($alt) { $newton = $alt.FullName } else { Write-Host "[MCP] Newtonsoft.Json.dll not found in $testAssemblies"; exit 4 }',
+        "}",
+        "try {",
+        "  . $psTestFunctions -newtonSoftDllPath $newton -clientDllPath $clientDll -clientContextScriptPath $clientContextScript",
+        "} catch {",
+        '  Write-Host "[MCP] Loading the BC client assemblies failed: $($_.Exception.Message)"',
+        "  exit 4",
+        "}",
+        'Write-Host "[MCP] Client Services URL: $serviceUrl (PowerShell $($PSVersionTable.PSVersion))"',
+        "$pagesToTry = @(130455, 130202, 130203, 130409)",
+        "$lastError = ''",
+        "foreach ($testPage in $pagesToTry) {",
+        "  $clientContext = $null",
+        "  try {",
+        '    Write-Host "[MCP] New-ClientContext + Run-Tests testPage=$testPage"',
+        "    $clientContext = New-ClientContext -serviceUrl $serviceUrl -auth 'NavUserPassword' -credential $cred -interactionTimeout ([timespan]::FromMinutes(10)) -culture 'en-US' -timezone $timezone",
+        "    $rtParams = @{ clientContext = $clientContext; TestSuite = $testSuite; detailed = $true; testPage = $testPage; JUnitResultFileName = $junit }",
+        "    if ($extensionId) { $rtParams.ExtensionId = $extensionId }",
+        "    if ($testPage -eq 130455) {",
+        "      if ($testCodeunitRange) { $rtParams.TestCodeunitRange = $testCodeunitRange }",
+        "      if ($testCodeunitOn130455) { $rtParams.TestCodeunit = $testCodeunitOn130455 }",
+        "      if ($testRunnerCodeunitId) { $rtParams.testRunnerCodeunitId = $testRunnerCodeunitId }",
+        "      if ($requiredTestIsolation) { $rtParams.requiredTestIsolation = $requiredTestIsolation }",
+        `      Write-Host "[MCP] Page 130455 filters TestCodeunitRange='$testCodeunitRange' TestCodeunit='$testCodeunitOn130455' TestRunner='$testRunnerCodeunitId' RequiredTestIsolation='$requiredTestIsolation'"`,
+        "    } elseif ($testCodeunit) {",
+        "      $rtParams.TestCodeunit = $testCodeunit",
+        "    }",
+        "    if ($testFunction) { $rtParams.TestFunction = $testFunction }",
+        "    $allPassed = Run-Tests @rtParams",
+        "    if ($allPassed -eq $false) { Write-Host '[MCP] Some tests failed'; exit 2 }",
+        "    Write-Host '[MCP] Tests finished (local Client Services)'; exit 0",
+        "  } catch {",
+        "    $lastError = $_.Exception.Message",
+        '    Write-Host "[MCP] testPage $testPage failed: $lastError"',
+        "  } finally {",
+        "    if ($clientContext) { try { Remove-ClientContext -clientContext $clientContext } catch { } }",
+        "  }",
+        "}",
+        'Write-Host "[MCP] All test pages failed. Last Client Services error: $lastError"',
+        "exit 3",
+    ];
+    return lines.join("\n");
+}
+function localBlocked(error, local) {
+    return {
+        ok: false,
+        mode: "blocked",
+        exitCode: 1,
+        durationMs: 0,
+        cosmoExecTestEndpoint: "none",
+        error,
+        hint: LOCAL_SETUP_HINT,
+        ...(local ? { local } : {}),
+    };
+}
+/** Never let a credential reach a preview, even if a library echoes it. */
+export function redactSecrets(text, secrets) {
+    let out = text;
+    for (const s of secrets) {
+        if (s && s.length >= 3)
+            out = out.split(s).join("***");
+    }
+    return out;
+}
+async function runLocalClientServices(input, conn) {
+    const webBase = resolveLocalWebClientBase(input, conn);
+    if (!webBase) {
+        return localBlocked("mode=local needs a web client URL: set clientServicesUrl on the connection (or tool input), " +
+            "or an on-prem baseUrl whose first path segment is the server instance.");
+    }
+    const company = input.companyName?.trim() || conn.companyName?.trim() || "";
+    const tenant = input.tenant?.trim() || conn.onPremTenant || "default";
+    const serviceUrl = localServiceUrl(webBase, tenant, company);
+    const testAssembliesPath = resolveTestAssembliesPath(input, conn);
+    const local = { clientServicesUrl: webBase, serviceUrl, testAssembliesPath };
+    if (!conn.user || !conn.key) {
+        return localBlocked("Connection needs on-prem user/key (NavUserPassword) for test credentials.", local);
+    }
+    if (!testAssembliesPath) {
+        return localBlocked("mode=local needs the BC 'Test Assemblies' folder: connection testAssembliesPath, tool input testAssembliesPath " +
+            "or env MCP_BC_TEST_ASSEMBLIES_PATH.", local);
+    }
+    if (!existsSync(join(testAssembliesPath, "Microsoft.Dynamics.Framework.UI.Client.dll"))) {
+        return localBlocked(`Microsoft.Dynamics.Framework.UI.Client.dll not found in ${testAssembliesPath} (as seen by the MCP process).`, local);
+    }
+    if (clientServicesCodeunitFilter(input).excludeNeedsExtensionRange) {
+        return localBlocked("mode=local cannot read the extension's id ranges: pass testCodeunitRange (e.g. 96900..96999) together with excludeCodeunits.", local);
+    }
+    const helpers = resolvePsTestHelperPaths();
+    if (!helpers.psTestFunctions || !helpers.clientContext) {
+        return localBlocked("Bundled PsTestFunctions.ps1 / ClientContext.ps1 not found next to the MCP build (dist/bc/pstest).", local);
+    }
+    const dir = mkdtempSync(join(tmpdir(), "origo-bc-local-tests-"));
+    const scriptPath = join(dir, "run-tests.ps1");
+    const junitPath = join(dir, "results.junit.xml");
+    writeFileSync(scriptPath, buildLocalTestScript(input, {
+        serviceUrl,
+        testAssembliesPath,
+        psTestFunctions: helpers.psTestFunctions,
+        clientContext: helpers.clientContext,
+        junitPath,
+    }), "utf8");
+    const pwsh = process.env.MCP_PWSH_PATH?.trim() || (process.platform === "win32" ? "pwsh.exe" : "pwsh");
+    const timeoutMs = input.timeoutMs ?? 15 * 60 * 1000;
+    const proc = await runProcess(pwsh, ["-NoProfile", "-NonInteractive", "-File", scriptPath], {
+        timeoutMs,
+        env: { MCP_BC_TEST_USER: conn.user, MCP_BC_TEST_PASSWORD: conn.key },
+    });
+    let junitXml;
+    if (existsSync(junitPath)) {
+        try {
+            junitXml = readFileSync(junitPath, "utf8");
+        }
+        catch {
+            /* ignore */
+        }
+    }
+    try {
+        rmSync(dir, { recursive: true, force: true });
+    }
+    catch {
+        /* ignore */
+    }
+    let passed;
+    let failed;
+    let skipped;
+    let errors;
+    let failures = [];
+    if (junitXml) {
+        ({ passed, failed, skipped, errors, failures } = parseJunit(junitXml));
+    }
+    else {
+        const parsed = parseConsoleSummary(proc.stdout + "\n" + proc.stderr);
+        ({ passed, failed, skipped } = parsed);
+        failures = parsed.failures;
+    }
+    const secrets = [conn.key];
+    const missingPwsh = proc.exitCode !== 0 && !proc.stdout.trim() && /ENOENT|not found|not recognized/i.test(proc.stderr);
+    return {
+        ok: proc.exitCode === 0,
+        mode: "local",
+        exitCode: proc.exitCode,
+        durationMs: proc.durationMs,
+        passed,
+        failed,
+        skipped,
+        errors,
+        failures: failures.length ? failures : undefined,
+        cosmoExecTestEndpoint: "none",
+        local,
+        stdoutPreview: truncate(redactSecrets(proc.stdout, secrets)),
+        stderrPreview: truncate(redactSecrets(proc.stderr, secrets)),
+        commandPreview: `${pwsh} -NoProfile -NonInteractive -File run-tests.ps1 # local Client Services ${serviceUrl}`,
+        error: missingPwsh ? `PowerShell (${pwsh}) could not be started in the MCP host.` : undefined,
+        hint: proc.exitCode === 0
+            ? undefined
+            : missingPwsh
+                ? LOCAL_SETUP_HINT
+                : "Local Client Services run did not pass. Exit 2 = tests failed; 3 = every test page failed (check the web client URL, " +
+                    "tenant/company and that the Test Runner app is published); 4 = setup (credentials, Test Assemblies, assembly load).",
+    };
+}
 function sshNotReadyResult(ssh) {
     return {
         ok: false,
@@ -1011,6 +1281,9 @@ export async function runBcTests(input, conn) {
     if (mode === "helper") {
         return runHelperLocal(input, conn);
     }
+    if (mode === "local" || (mode === "auto" && shouldRunLocal(input, conn))) {
+        return runLocalClientServices(input, conn);
+    }
     const containerId = input.containerId?.trim();
     if (!containerId) {
         return {
@@ -1019,7 +1292,8 @@ export async function runBcTests(input, conn) {
             exitCode: 1,
             durationMs: 0,
             cosmoExecTestEndpoint: "none",
-            error: "containerId is required for Cosmo SSH test runs (mode=auto|ssh). For a local docker container use mode=helper + containerName.",
+            error: "containerId is required for Cosmo SSH test runs (mode=auto|ssh). For a local docker container use mode=helper + containerName; " +
+                "for a native (non-container) BC use mode=local with clientServicesUrl + testAssembliesPath on the connection.",
             hint: SSH_UNAVAILABLE_HINT,
         };
     }

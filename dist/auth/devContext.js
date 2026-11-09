@@ -43,6 +43,8 @@ export function buildDevConnectionContext(opts = {}) {
                 key: dc.key,
                 companyId: dc.companyId,
                 companyName: dc.companyName,
+                clientServicesUrl: dc.clientServicesUrl,
+                testAssembliesPath: dc.testAssembliesPath,
             },
         };
     }
