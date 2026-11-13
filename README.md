@@ -942,6 +942,8 @@ The dashboard is protected by the same Basic Auth credentials configured in Setu
 | `MCP_PUBLIC_URL` | `http://localhost:3000` | Public URL for the server |
 | `PORT` | `3000` | Listen port |
 | `MCP_DEBUG` | — | Set to `1` to enable debug logging (also toggleable from dashboard) |
+| `MCP_SESSION_IDLE_MINUTES` | `30` | Idle minutes before a Streamable HTTP session (and its McpServer) is closed |
+| `MCP_MAX_SESSIONS` | `150` | Open session cap (each holds ~2 MB heap); above it the least recently used idle sessions are closed and their clients re-initialize |
 | `OLLAMA_PROXY_TARGET` | `http://192.168.16.241:11434` | Ollama server URL for the `/ollama` proxy endpoint |
 
 #### Generating `MCP_ENCRYPTION_KEY`
